@@ -13,6 +13,7 @@ const DEFAULTS = {
     micBridgeEnabled: false,  // 键盘麦克风 → 虚拟声卡桥接
     micSinkId: '',            // 桥接播放设备（虚拟声卡播放端，如 CABLE Input）
     micTriggerKeys: ['f10', 'ai_key'], // 按住即开麦的键（可设置）
+    statsEnabled: true,      // 打字统计（只记每键计数与每日总数，纯本地 stats.json）
   },
 };
 

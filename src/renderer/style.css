@@ -132,3 +132,36 @@ button.capturing {
   border-color: var(--accent) !important; color: var(--accent) !important;
   background: rgba(79,140,255,.12);
 }
+
+/* 打字统计卡片 */
+.stats-card {
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+  padding: 14px 16px; margin-bottom: 16px;
+}
+.stats-row1 { display: flex; gap: 20px; margin-bottom: 12px; }
+.stats-total {
+  flex: 0 0 auto; min-width: 110px; display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  border-right: 1px solid var(--line); padding-right: 20px;
+}
+#stats-today { font-size: 32px; font-weight: 700; color: var(--accent); line-height: 1.2; }
+.stats-total span { color: var(--muted); font-size: 12px; }
+.stats-topkeys { flex: 1; display: flex; flex-direction: column; gap: 4px; justify-content: center; }
+.tk-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.tk-row .tk-name { flex: 0 0 52px; color: var(--muted); text-align: right; white-space: nowrap; }
+.tk-row .tk-bar {
+  flex: 1; min-width: 2px; height: 8px; border-radius: 4px;
+  background: linear-gradient(90deg, var(--accent), #7ee0a3);
+}
+.tk-row .tk-count { flex: 0 0 auto; min-width: 36px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.stats-week { display: flex; align-items: stretch; gap: 8px; height: 76px; }
+.sw-col { flex: 1; display: flex; flex-direction: column; gap: 4px; }
+.sw-slot { flex: 1; display: flex; align-items: flex-end; justify-content: center; }
+.sw-bar {
+  width: 100%; max-width: 26px; min-height: 2px;
+  border-radius: 3px 3px 0 0; background: #2a3140;
+}
+.sw-col.today .sw-bar { background: var(--accent); }
+.sw-label { color: var(--muted); font-size: 10px; text-align: center; }
+.sw-col.today .sw-label { color: var(--accent); }
+#stats-body.dim { opacity: .45; }

@@ -187,4 +187,5 @@ function scheduleAfter(action) {
   setTimeout(() => sendHotkey(action.afterHotkey), delay);
 }
 
-module.exports = { run, sendHotkey, vkOf };
+// VK_KEYNAMES：按平台选好的「键名→键码」表（打字统计用它构建反向轮询表）
+module.exports = { run, sendHotkey, vkOf, VK_KEYNAMES: VK };

@@ -1,7 +1,7 @@
 # RK R87 Pro AI 键盘 HID 协议（逆向自官方 RK-AI 1.0.2）
 
 来源：`%LOCALAPPDATA%\Programs\RK-AI\resources\app.asar` 内 `background.js`（Electron，代码明文）。
-逆向产物在 `_reversed/` 目录（hid_core / hid_section / key_logic / frame）。
+逆向产物（hid_core / hid_section / key_logic / frame 的 .pretty.js）存于开发者本地项目外目录，不入仓库。
 
 ## 1. 设备识别
 
@@ -175,3 +175,73 @@ const e = Array.from({length: 32}, () => Math.floor(Math.random() * 256));
   node-hid 写蓝牙口同样成功但实测键盘不回（原因未深究，可能与其内部
   output report 长度处理有关；mi-hid 实测稳定）
 - `vendor/mi-sbc/`：官方音频解码器（全平台 prebuilds）
+
+## 8. 灯效控制（V3 逆向结论：R87 Pro AI 无软件灯效协议）
+
+### 8.1 结论
+
+官方 RK-AI 1.0.2 **没有 R87 Pro AI（hidType 1010）的灯效控制命令**。整个软件里唯一的灯效功能属于
+传统 MK87 / RK R87 键盘（hidType 30/31，VID 0x0C45、PID 0x7101/0x7102，即"RK R87"非 AI 版），
+走的是与本项目 KeySession 完全不同的传统协议栈。这把 AI 键盘的灯效由固件自理（Fn 组合键调节），
+官方软件不做软件侧控制。判定证据链（三处独立交叉验证）：
+
+1. **主进程设备分发**（`hid_section.pretty.js` `deviceProcess`）：`x(hidType)` 只对 MK87(30)/R87(31)
+   为真 → 设备进 `CMk87Reader`（`m_listMk87`，灯效命令的唯一宿主）；R87ProAIB(1010) 判假 → 进 AI
+   类 `Xe`（`hid_core.pretty.js:3104`，series 2）。`Xe` 除继承基类外只新增一个
+   `onPadKeyWorkModeSwitch`（cmd 209 普通模式切换），无任何灯效方法。
+2. **AI 协议层命令全景**（基类 `Ze`，`hid_core.pretty.js:2370~2433`，即 noticeHid_* 全部发送点）：
+   1 Open / 2 Exit / 3·4 麦克风 / 5 心跳 / 6 DPI / 8·9·10·11 固件 OTA / 12·13 设备·接收器状态 /
+   15 验证 / 17 SN / 22 回报率 / 24 改键 / 25 恢复默认——**无灯效命令**。全部 IPC 通道
+   （`key_logic.pretty.js` ipcMain.on 清单）里灯效相关的也只有 `mk87SetLightMode` 一个，
+   其实现只遍历 `m_listMk87`（AI 键盘不在其中）。
+3. **渲染层 UI 门控**：唯一灯效界面（`LightEffect` 组件，「灯效设置」tab）挂在 DeviceDetail 页，
+   组件按 `device.type` 分发：type 1/2/3（Mouse/Keyboard/LaserPen）→ DeviceDetail_Normal（DPI、
+   回报率、AI 键设置，无灯效）；type 4（MK87，即 `m_mk87Device` 列表）→ 带 LightEffect 的
+   DeviceDetail。R87ProAIB 的 type=2（`hid_section.pretty.js:1236` 设备类型函数）→ 无灯效入口。
+
+### 8.2 传统 MK87 灯效协议（附带产物，仅存档参考）
+
+> 以下属于 MK87 / RK R87（非 AI 版）的协议栈，帧格式与本项目 KeySession（05 FF Fx 帧）不兼容，
+> 仅为将来可能遇到传统 R87 设备时留档。
+
+- 设备：VID `0x0C45` / PID `0x7101`(MK87)、`0x7102`(RK R87)；处理类 `CMk87Reader`。
+- 写帧 `EncodeMk87`（`frame.pretty.js`，reportId 0x06，定长 lenWrite）：
+
+  ```
+  [0x06, 0xFE, 0xC0, cmd, param, waitAck(0/1),
+   msgID_lo, msgID_hi, blockCnt, blockIdx_lo, blockIdx_hi, dataLen, data[dataLen]..., 0xEF]
+  ```
+
+- 读帧 `DecodeHid_RK`（reportId 0x01）：`[0x01, 0xFA, 0xF2, 0xFE, 0xC1, cmd, len, data..., 0xEF]`。
+- 灯效命令（`hid_section.pretty.js` `UI_SetLightMode` / `OnProcMk87_LightMode`，连接初始化时
+  `SendToMk87_1(101,0)` 查询一次）：
+  - **查询当前灯效：cmd=101，param=0**
+  - **设置灯效：cmd=102，param=模式值（1~12），无 data**
+  - 键盘回应（cmd 101 或 102）：**模式值在 param 字段**，data[0]=单色模式当前颜色下标
+    （只读状态，软件不下发颜色）
+- 模式表（渲染层 `LightEffect` 组件逆向，设置值即 param）：
+
+  | 值 | 官方名称 | 备注 |
+  |---|---|---|
+  | 1 | 关闭灯光 (Light_Close) | |
+  | 2 | 多色呼吸 (LightMode_02) | |
+  | 3 | 单色长亮 (LightMode_03) | 颜色由键盘 Fn+Backspace 循环切换 |
+  | 4 | 单色呼吸 (LightMode_04) | 同上 |
+  | 5 | 多色渐变 (LightMode_05) | |
+  | 6 | 按键按下时长亮 (LightMode_06) | UI 模拟：点按键亮/灭 |
+  | 7 | 左右波浪 (LightMode_07) | |
+  | 8 | 上下波浪 (LightMode_08) | |
+  | 9 | 由中心向外扩散 (LightMode_09) | |
+  | 12 | (LightMode_12) | 枚举存在但 UI 未列出；渲染层灯光模拟器按动画模式处理 |
+
+- **无速度、亮度参数，无自定义 RGB 颜色下发**——官方灯效 UI 只有模式单选一组。
+  单色模式颜色循环表（键盘 Fn+Backspace 循环，渲染层 `rgbTable`，共 9 色）：
+  红 `[255,0,0]`、绿 `[0,255,0]`、蓝 `[0,0,255]`、橙红 `[255,69,0]`、春绿 `[0,255,127]`、
+  湛蓝 `[30,144,255]`、黄 `[255,255,0]`、品红 `[255,0,255]`、青 `[0,255,255]`
+
+### 8.3 对本项目的意义
+
+- 「RGB 灯效自定义」功能在本协议范围内**无法实现**（没有可调参数，甚至没有开关命令）；
+  除非固件未来 OTA 开放（观察点：新固件出现新 cmd 或 cmd 156/105 回包扩展字段）。
+- 若仅想做"灯效开关"实验：可尝试向 AI 会话发传统 cmd 102 帧观察键盘是否响应——
+  官方代码从未这样做过，成功率低，属探索性质，不影响主功能。

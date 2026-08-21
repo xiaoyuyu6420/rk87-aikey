@@ -29,6 +29,7 @@ async function init() {
   renderList();
 
   initMicBridge();
+  initStats();
   window.aikey.onKeyEvent(ev => {
     if (ev.phase !== 'down') return;
     const row = document.querySelector(`.key-row[data-id="${ev.keyId}"]`);
@@ -420,4 +421,101 @@ async function initMicBridge() {
   }
 
   await refreshSinks();
+}
+
+// ---------- 打字统计 ----------
+// 主进程轮询系统键状态计数，这里每 2 秒拉一次摘要渲染（窗口可见时才拉）。
+const KEY_LABELS = {
+  space: '空格', enter: '回车', backspace: '退格', tab: 'Tab', esc: 'Esc',
+  up: '↑', down: '↓', left: '←', right: '→',
+  home: 'Home', end: 'End', pgup: 'PgUp', pgdn: 'PgDn', delete: 'Del', insert: 'Ins',
+  minus: '-', equal: '=', comma: ',', period: '.', slash: '/', backtick: '`',
+  lbracket: '[', rbracket: ']', backslash: '\\', semicolon: ';', quote: "'",
+};
+function keyLabel(name) {
+  if (KEY_LABELS[name]) return KEY_LABELS[name];
+  if (/^[a-z0-9]$/.test(name) || /^f\d+$/.test(name)) return name.toUpperCase();
+  return name;
+}
+
+let statsTimer = null;
+function initStats() {
+  const opt = document.getElementById('opt-stats');
+  opt.checked = state.settings.statsEnabled !== false;
+  opt.onchange = async () => {
+    state.settings.statsEnabled = opt.checked;
+    await window.aikey.setSettings({ statsEnabled: opt.checked });
+    refreshStats();
+  };
+  if (statsTimer) clearInterval(statsTimer);
+  statsTimer = setInterval(() => { if (!document.hidden) refreshStats(); }, 2000);
+  refreshStats();
+}
+
+async function refreshStats() {
+  let s;
+  try { s = await window.aikey.statsGet(); } catch (_) { return; }
+  const body = document.getElementById('stats-body');
+  const unsup = document.getElementById('stats-unsupported');
+  if (!s || s.supported === false) {
+    body.hidden = true;
+    unsup.hidden = false;
+    return;
+  }
+  unsup.hidden = true;
+  body.hidden = false;
+  body.classList.toggle('dim', !s.enabled);
+
+  // 今日总数
+  document.getElementById('stats-today').textContent = (s.today.total || 0).toLocaleString();
+
+  // 今日 Top5 键（水平条）
+  const topBox = document.getElementById('stats-topkeys');
+  topBox.innerHTML = '';
+  const top = (s.today.topKeys || []).slice(0, 5);
+  const max = top.length ? top[0].count : 0;
+  for (const k of top) {
+    const row = document.createElement('div');
+    row.className = 'tk-row';
+    const name = document.createElement('span');
+    name.className = 'tk-name';
+    name.textContent = keyLabel(k.name);
+    const bar = document.createElement('div');
+    bar.className = 'tk-bar';
+    bar.style.width = Math.max(3, Math.round(k.count / max * 100)) + '%';
+    const count = document.createElement('span');
+    count.className = 'tk-count';
+    count.textContent = k.count;
+    row.append(name, bar, count);
+    topBox.appendChild(row);
+  }
+  if (!top.length) {
+    const empty = document.createElement('span');
+    empty.className = 'none-hint';
+    empty.textContent = '今天还没有按键记录';
+    topBox.appendChild(empty);
+  }
+
+  // 近 7 天柱状图
+  const weekBox = document.getElementById('stats-week');
+  weekBox.innerHTML = '';
+  const wmax = Math.max(1, ...s.week.map(d => d.total || 0));
+  const now = new Date(); // 主进程按本地时区记日，这里同样取本地日期
+  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  for (const d of s.week) {
+    const col = document.createElement('div');
+    col.className = 'sw-col' + (d.date === todayStr ? ' today' : '');
+    const slot = document.createElement('div');
+    slot.className = 'sw-slot';
+    const bar = document.createElement('div');
+    bar.className = 'sw-bar';
+    bar.style.height = Math.round((d.total || 0) / wmax * 100) + '%';
+    bar.title = `${d.date}：${(d.total || 0).toLocaleString()} 次`;
+    slot.appendChild(bar);
+    const label = document.createElement('span');
+    label.className = 'sw-label';
+    label.textContent = d.date.slice(5); // MM-DD
+    col.append(slot, label);
+    weekBox.appendChild(col);
+  }
 }

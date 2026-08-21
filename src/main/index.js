@@ -8,6 +8,7 @@ const { KeyboardWatcher } = require('./hid');
 const { KeySession } = require('./kb-session');
 const { lookupKey, allKeys } = require('./keymap');
 const { MicPipeline } = require('./mic');
+const { TypingStats } = require('./stats');
 const actions = require('./actions');
 const config = require('./config');
 
@@ -20,6 +21,7 @@ let sessionOnline = false;
 let deviceConnected = false;
 let isQuitting = false;
 let micPipeline = null;
+let stats = null;          // 打字统计（系统级键状态轮询，只记计数）
 let pcmBatch = [];       // 攒 ~120ms 批量下发渲染进程
 let pcmBatchTimer = null;
 
@@ -78,6 +80,10 @@ function boot() {
     }
   });
   session.start();
+
+  // 打字统计：先载入历史（禁用时也能看），启用才开轮询
+  stats = new TypingStats().load();
+  if (cfg.settings.statsEnabled !== false) stats.start();
 
   createTray();
   if (cfg.settings.autostart) setAutostart(true);
@@ -220,8 +226,16 @@ ipcMain.handle('set-settings', (_e, settings) => {
   cfg.settings = { ...cfg.settings, ...settings };
   config.save(cfg);
   if ('autostart' in settings) setAutostart(settings.autostart);
+  if ('statsEnabled' in settings && stats) {
+    settings.statsEnabled ? stats.start() : stats.stop();
+  }
   rebuildTrayMenu();
   return { ok: true };
+});
+
+ipcMain.handle('stats-get', () => {
+  const enabled = cfg.settings.statsEnabled !== false;
+  return stats ? { ...stats.summary(), enabled } : { supported: false, enabled };
 });
 
 ipcMain.handle('mic-control', (_e, on) => {
@@ -247,4 +261,5 @@ app.on('before-quit', () => {
   isQuitting = true;
   if (watcher) watcher.stop();
   if (session) session.stop();
+  if (stats) stats.stop(); // 统计落盘
 });

@@ -25,6 +25,14 @@
 
 技术链路：命令会话开麦 → 键盘音频流（厂商私有编码，mi-sbc 解码）→ 16kHz PCM + AGC/降噪 → WebAudio 播到虚拟声卡。
 
+## 打字统计
+
+统计你每天敲了多少键：今日总数、最常用键 Top5、近 7 天柱状图，设置窗口「打字统计」卡片里查看，可随时关闭（默认开启）。
+
+- 原理：轮询系统级键状态（Windows `GetAsyncKeyState` / macOS `CGEventSourceKeyState`，无需额外权限），不装键盘钩子、不读键盘 HID，不会与系统抢键盘
+- **隐私**：只记录「每键计数」和「每日总数」，不记录按键顺序、时间戳序列或所在应用，不上传任何数据；纯本地 `userData/stats.json`，仅保留最近 90 天
+- Linux 不支持（界面会提示）
+
 ## 键位表（实测标定）
 
 | 物理键 | 键码(按/抬) | 官方原功能 |
@@ -66,6 +74,7 @@ pnpm dist:mac     # 打包 macOS zip（arm64 + x64，未签名，建议在 Mac �
 目录要点：
 - `src/main/kb-session.js` — 键盘命令会话（蓝牙口心跳/验证/开麦）
 - `src/main/mic.js` — 音频解码管线（vendor mi-sbc + AGC/高通/噪声门）
+- `src/main/stats.js` — 打字统计（系统级键状态轮询 + 本地计数）
 - `vendor/mi-hid/` `vendor/mi-sbc/` — 官方库 vendor（HID 驱动 / 音频解码）
 - `docs/protocol.md` — 完整协议逆向文档
 
