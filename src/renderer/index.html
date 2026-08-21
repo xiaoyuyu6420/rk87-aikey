@@ -46,7 +46,11 @@
     <section class="stats-card" id="stats-card">
       <div class="mic-head">
         <h2>打字统计</h2>
-        <label><input type="checkbox" id="opt-stats" /> 启用统计</label>
+        <div class="stats-opts">
+          <label title="连续打字满阈值弹系统提醒，停笔 1 分钟重新计时">疲劳提醒 <input type="checkbox" id="opt-fatigue" /></label>
+          <input type="number" id="fatigue-min" min="5" max="120" step="5" style="width:52px" title="提醒阈值（分钟）" /> 分钟
+          <label><input type="checkbox" id="opt-stats" /> 启用统计</label>
+        </div>
       </div>
       <p class="sub" id="stats-unsupported" hidden>当前平台不支持打字统计</p>
       <div id="stats-body">
@@ -58,6 +62,8 @@
           <div class="stats-topkeys" id="stats-topkeys"></div>
         </div>
         <div class="stats-week" id="stats-week"></div>
+        <div class="heatmap-title">今日键位热力图 <small>（悬停看次数，越亮按得越多）</small></div>
+        <div class="stats-heatmap" id="stats-heatmap"></div>
       </div>
       <p class="sub">隐私：只记录每键计数与每日总数，不记录按键顺序、时间与应用信息，数据仅存本机（保留 90 天）。</p>
     </section>

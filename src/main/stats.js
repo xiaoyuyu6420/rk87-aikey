@@ -42,6 +42,11 @@ class TypingStats {
     this.lastDirtyTs = 0;
     this.pending = 0;
     this.todayKey = localDate();
+    // 疲劳提醒：连续打字满阈值弹系统通知，停笔 1 分钟即断段，提醒后冷却
+    this.fatigue = { enabled: true, minutes: 25 };
+    this.lastKeyPressTs = 0;
+    this.streakStartTs = 0;
+    this.lastRemindTs = 0;
   }
 
   statsPath() {
@@ -143,6 +148,31 @@ class TypingStats {
     }
     // 防抖落盘：距最后一次变更满 30s
     if (this.dirty && Date.now() - this.lastDirtyTs >= FLUSH_AFTER_MS) this.flush();
+    // 疲劳检测：停笔超 1 分钟断段
+    if (this.streakStartTs && Date.now() - this.lastKeyPressTs > 60 * 1000) {
+      this.streakStartTs = 0;
+    }
+    if (this.streakStartTs &&
+        this.fatigue.enabled &&
+        Date.now() - this.streakStartTs >= this.fatigue.minutes * 60 * 1000 &&
+        Date.now() - this.lastRemindTs >= 10 * 60 * 1000) {
+      this.lastRemindTs = Date.now();
+      this.streakStartTs = Date.now(); // 从提醒时刻重新计段，避免每 tick 重复弹
+      this.notifyFatigue();
+    }
+  }
+
+  notifyFatigue() {
+    try {
+      const { Notification } = require('electron');
+      if (!Notification.isSupported()) return;
+      const n = new Notification({
+        title: '该歇歇手了',
+        body: `已连续打字 ${this.fatigue.minutes} 分钟，起来活动一下手腕吧`,
+        silent: false,
+      });
+      n.show();
+    } catch (_) { /* 通知失败不影响统计 */ }
   }
 
   count(name) {
@@ -151,6 +181,9 @@ class TypingStats {
     d.keys[name] = (d.keys[name] || 0) + 1;
     this.dirty = true;
     this.lastDirtyTs = Date.now();
+    const now = Date.now();
+    this.lastKeyPressTs = now;
+    if (!this.streakStartTs) this.streakStartTs = now; // 从闲到忙，开始新段
     if (++this.pending >= FLUSH_EVERY_KEYS) this.flush(); // 满 200 键立即落盘
   }
 
@@ -183,7 +216,7 @@ class TypingStats {
       const ds = localDate(new Date(now.getFullYear(), now.getMonth(), now.getDate() - i));
       week.push({ date: ds, total: (this.days[ds] || {}).total || 0 });
     }
-    return { supported: this.supported, today: { total: today.total || 0, topKeys }, week };
+    return { supported: this.supported, today: { total: today.total || 0, topKeys, keys: today.keys || {} }, week };
   }
 }
 

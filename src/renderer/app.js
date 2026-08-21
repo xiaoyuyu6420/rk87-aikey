@@ -447,6 +447,21 @@ function initStats() {
     await window.aikey.setSettings({ statsEnabled: opt.checked });
     refreshStats();
   };
+  // 疲劳提醒（连续打字满阈值弹系统通知）
+  const optFat = document.getElementById('opt-fatigue');
+  const fatMin = document.getElementById('fatigue-min');
+  optFat.checked = state.settings.fatigueEnabled !== false;
+  fatMin.value = state.settings.fatigueMinutes || 25;
+  optFat.onchange = () => {
+    state.settings.fatigueEnabled = optFat.checked;
+    window.aikey.setSettings({ fatigueEnabled: optFat.checked });
+  };
+  fatMin.onchange = () => {
+    const v = Math.max(5, Math.min(120, Number(fatMin.value) || 25));
+    fatMin.value = v;
+    state.settings.fatigueMinutes = v;
+    window.aikey.setSettings({ fatigueMinutes: v });
+  };
   if (statsTimer) clearInterval(statsTimer);
   statsTimer = setInterval(() => { if (!document.hidden) refreshStats(); }, 2000);
   refreshStats();
@@ -496,6 +511,9 @@ async function refreshStats() {
     topBox.appendChild(empty);
   }
 
+  // 今日键位热力图（QWERTY 简化网格）
+  renderHeatmap(s.today.keys || {});
+
   // 近 7 天柱状图
   const weekBox = document.getElementById('stats-week');
   weekBox.innerHTML = '';
@@ -517,5 +535,41 @@ async function refreshStats() {
     label.textContent = d.date.slice(5); // MM-DD
     col.append(slot, label);
     weekBox.appendChild(col);
+  }
+}
+
+// ---------- 今日键位热力图 ----------
+// QWERTY 简化网格（键名与主进程统计名一致），宽键用 flex 拉伸
+const HEATMAP_ROWS = [
+  ['1','2','3','4','5','6','7','8','9','0','minus','equal'],
+  ['q','w','e','r','t','y','u','i','o','p','lbracket','rbracket'],
+  ['a','s','d','f','g','h','j','k','l','semicolon','quote'],
+  ['z','x','c','v','b','n','m','comma','period','slash'],
+  [{ n: 'tab', w: 1.6 }, { n: 'space', w: 5 }, { n: 'enter', w: 1.6 }, { n: 'backspace', w: 1.8 }],
+];
+function renderHeatmap(keys) {
+  const box = document.getElementById('stats-heatmap');
+  if (!box) return;
+  box.innerHTML = '';
+  const max = Math.max(1, ...Object.values(keys));
+  for (const row of HEATMAP_ROWS) {
+    const rowEl = document.createElement('div');
+    rowEl.className = 'hm-row';
+    for (const cell of row) {
+      const name = typeof cell === 'string' ? cell : cell.n;
+      const c = keys[name] || 0;
+      const el = document.createElement('span');
+      el.className = 'hm-key' + (c ? ' hot' : '');
+      el.textContent = keyLabel(name);
+      el.title = `${keyLabel(name)}：${c} 次`;
+      if (c) {
+        const a = Math.min(1, 0.18 + 0.82 * Math.sqrt(c / max)); // 平方根让低频也可见
+        el.style.background = `rgba(79,140,255,${a.toFixed(2)})`;
+        el.style.color = a > 0.55 ? '#fff' : '';
+      }
+      if (typeof cell !== 'string' && cell.w) el.style.flexGrow = cell.w;
+      rowEl.appendChild(el);
+    }
+    box.appendChild(rowEl);
   }
 }

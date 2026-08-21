@@ -83,6 +83,10 @@ function boot() {
 
   // 打字统计：先载入历史（禁用时也能看），启用才开轮询
   stats = new TypingStats().load();
+  stats.fatigue = {
+    enabled: cfg.settings.fatigueEnabled !== false,
+    minutes: Math.max(5, Number(cfg.settings.fatigueMinutes) || 25),
+  };
   if (cfg.settings.statsEnabled !== false) stats.start();
 
   createTray();
@@ -228,6 +232,10 @@ ipcMain.handle('set-settings', (_e, settings) => {
   if ('autostart' in settings) setAutostart(settings.autostart);
   if ('statsEnabled' in settings && stats) {
     settings.statsEnabled ? stats.start() : stats.stop();
+  }
+  if (stats) {
+    if ('fatigueEnabled' in settings) stats.fatigue.enabled = settings.fatigueEnabled !== false;
+    if ('fatigueMinutes' in settings) stats.fatigue.minutes = Math.max(5, Number(settings.fatigueMinutes) || 25);
   }
   rebuildTrayMenu();
   return { ok: true };
