@@ -1,0 +1,134 @@
+:root {
+  --bg: #0f1115;
+  --card: #171a21;
+  --line: #262b36;
+  --text: #e6e9ef;
+  --muted: #8b93a3;
+  --accent: #4f8cff;
+  --ok: #3ecf8e;
+  --warn: #ffb224;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 20px; border-bottom: 1px solid var(--line);
+  position: sticky; top: 0; background: var(--bg); z-index: 5;
+}
+.title { display: flex; align-items: center; gap: 12px; }
+h1 { font-size: 17px; margin: 0; }
+.badge {
+  font-size: 12px; padding: 2px 10px; border-radius: 999px;
+  background: #2a2f3a; color: var(--muted);
+}
+.badge.on { background: rgba(62,207,142,.15); color: var(--ok); }
+.header-settings { display: flex; gap: 18px; color: var(--muted); font-size: 13px; }
+.header-settings label { cursor: pointer; }
+
+main { padding: 16px 20px 40px; }
+.hint p { margin: 4px 0; color: var(--muted); font-size: 13px; }
+.hint .sub { opacity: .8; }
+
+#key-list { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+
+.key-row {
+  display: grid;
+  grid-template-columns: 200px 120px 1fr auto;
+  gap: 10px; align-items: center;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 10px; padding: 10px 14px;
+  transition: border-color .15s;
+}
+.key-row.flash { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(79,140,255,.25); }
+.key-name { font-weight: 600; cursor: default; user-select: none; }
+.key-name small { display: block; color: var(--muted); font-weight: 400; font-size: 11px; }
+
+select, input[type=text], input[type=number] {
+  background: #0c0e12; color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px;
+  padding: 7px 10px; font-size: 13px; width: 100%;
+}
+select:focus, input:focus { outline: none; border-color: var(--accent); }
+
+.action-fields { display: flex; gap: 8px; align-items: center; }
+.action-fields > * { flex: 1; }
+.action-fields .fixed { flex: 0 0 auto; }
+.action-fields button {
+  flex: 0 0 auto; cursor: pointer;
+  background: #21262f; color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px; padding: 7px 12px;
+}
+.action-fields button:hover { border-color: var(--accent); }
+.row-actions { display: flex; gap: 6px; }
+.row-actions button {
+  cursor: pointer; background: transparent; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px;
+}
+.row-actions button:hover { color: var(--text); border-color: var(--accent); }
+
+label.after-line { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; flex: 1; }
+label.after-line input[type=number] { width: 64px; flex: 0 0 auto; }
+label.after-line input[type=text] { flex: 1; }
+.none-hint { color: var(--muted); font-size: 12px; }
+
+.toast {
+  position: fixed; bottom: 18px; right: 18px;
+  background: var(--card); border: 1px solid var(--line);
+  padding: 10px 16px; border-radius: 10px; font-size: 13px;
+  opacity: 0; transition: opacity .2s; pointer-events: none;
+}
+.toast.show { opacity: 1; }
+.toast.err { border-color: var(--warn); color: var(--warn); }
+
+/* 麦克风桥接卡片 */
+.mic-card {
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+  padding: 14px 16px; margin-bottom: 16px;
+}
+.mic-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.mic-head h2 { font-size: 14px; font-weight: 600; margin: 0; }
+.mic-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.mic-row .mic-label { color: var(--muted); font-size: 12px; flex: 0 0 auto; }
+.mic-row select {
+  flex: 1; background: var(--bg); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px;
+}
+.mic-row select option { background: var(--bg); }
+.ghost-btn {
+  cursor: pointer; background: transparent; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px;
+}
+.ghost-btn:hover { color: var(--text); border-color: var(--accent); }
+#mic-state-badge.on { border-color: var(--accent); color: var(--accent); }
+#mic-state-badge.offline { opacity: .45; }
+#mic-toggle:disabled { opacity: .45; cursor: not-allowed; }
+.mic-level {
+  height: 6px; border-radius: 3px; background: var(--bg);
+  border: 1px solid var(--line); overflow: hidden; margin-bottom: 8px;
+}
+#mic-level-bar {
+  height: 100%; width: 0%;
+  background: linear-gradient(90deg, var(--accent), #7ee0a3);
+  transition: width .08s linear;
+}
+
+/* 按住说话键勾选 */
+.trigger-keys { display: flex; flex-wrap: wrap; gap: 4px 12px; flex: 1; }
+.trigger-keys .tk {
+  display: inline-flex; align-items: center; gap: 4px;
+  color: var(--muted); font-size: 12px; cursor: pointer; user-select: none;
+}
+.trigger-keys .tk input { accent-color: var(--accent); }
+
+/* 快捷键捕获按钮激活态 */
+button.capturing {
+  border-color: var(--accent) !important; color: var(--accent) !important;
+  background: rgba(79,140,255,.12);
+}

@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'" />
+  <title>RK87 AIKey</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <div class="title">
+      <h1>RK87 AIKey</h1>
+      <span id="device-status" class="badge">检测中…</span>
+    </div>
+    <div class="header-settings">
+      <label><input type="checkbox" id="opt-autostart" /> 开机自启</label>
+    </div>
+  </header>
+
+  <main>
+    <section class="hint">
+      <p>① 按键盘上的「AI 切换」键进入 AI 模式（F 行白灯亮） → ② 在下面对每个键配置动作 → ③ 按键即触发。</p>
+      <p class="sub">提示：直接按键盘上的键，下面对应行会闪烁高亮，方便标定哪个键位是哪一行。双击行名称可改备注名。</p>
+    </section>
+
+    <section class="mic-card" id="mic-card">
+      <div class="mic-head">
+        <h2>键盘麦克风 → 虚拟麦克风</h2>
+        <label><input type="checkbox" id="opt-mic-bridge" /> 启用桥接</label>
+      </div>
+      <div class="mic-row">
+        <span class="mic-label">播放设备</span>
+        <select id="mic-sink"></select>
+        <button id="mic-refresh" class="ghost-btn">刷新</button>
+        <button id="mic-toggle" class="ghost-btn" disabled>会话离线</button>
+        <span id="mic-state-badge" class="badge">静音</span>
+      </div>
+      <div class="mic-row">
+        <span class="mic-label">按住说话键</span>
+        <div id="mic-trigger-keys" class="trigger-keys"></div>
+      </div>
+      <div class="mic-level"><div id="mic-level-bar"></div></div>
+      <p class="sub">装虚拟声卡（Win: VB-Cable vb-audio.com/Cable ／ Mac: BlackHole existential.audio，brew install blackhole-2ch）→ 勾「启用桥接」→ 播放设备选 CABLE Input / BlackHole 2ch → 按住开麦键说话。系统默认输入设备选 CABLE Output / BlackHole 2ch，任意软件即可当麦克风用。</p>
+    </section>
+
+    <div id="key-list"></div>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

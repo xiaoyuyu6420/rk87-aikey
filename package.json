@@ -1,0 +1,51 @@
+{
+  "name": "rk87-aikey",
+  "productName": "RK87 AIKey",
+  "version": "0.4.0",
+  "description": "RK R87 Pro AI 键盘自定义功能键 + 麦克风工具（无需官方 RK-AI 软件）",
+  "main": "src/main/index.js",
+  "author": "xiaoyuyu6420",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xiaoyuyu6420/rk87-aikey.git"
+  },
+  "scripts": {
+    "start": "electron .",
+    "listen": "node tools/listen.js",
+    "dist": "electron-builder --win portable",
+    "dist:mac": "electron-builder --mac zip"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "dependencies": {
+    "koffi": "^2.8.0",
+    "node-hid": "^3.1.0"
+  },
+  "build": {
+    "appId": "com.local.rk87aikey",
+    "productName": "RK87 AIKey",
+    "npmRebuild": false,
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "vendor/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "portable",
+      "icon": "assets/icon.png"
+    },
+    "portable": {
+      "artifactName": "RK87-AIKey-${version}-portable.exe"
+    },
+    "mac": {
+      "target": [{ "target": "zip", "arch": ["arm64", "x64"] }],
+      "category": "public.app-category.utilities",
+      "icon": "assets/icon.png",
+      "identity": null
+    }
+  }
+}

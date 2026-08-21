@@ -1,0 +1,39 @@
+{
+  "name": "mi-hid",
+  "description": "USB HID device access library",
+  "version": "2.0.0",
+  "bin": {
+    "hid-showdevices": "./src/show-devices.js"
+  },
+  "main": "./nodehid.js",
+  "types": "./nodehid.d.ts",
+  "binary": {
+    "napi_versions": [
+      4
+    ]
+  },
+  "engines": {
+    "node": ">=10.16"
+  },
+  "license": "(MIT OR X11)",
+  "dependencies": {
+    "node-addon-api": "^3.2.1",
+    "pkg-prebuilds": "^0.2.1"
+  },
+  "devDependencies": {
+    "rimraf": "^2.6.2"
+  },
+  "gypfile": true,
+  "files": [
+    "nodehid.js",
+    "nodehid.d.ts",
+    "binding-options.js",
+    "hidapi",
+    "prebuilds",
+    "src/*.cc",
+    "src/*.h",
+    "LICENSE*",
+    "README.md",
+    "binding.gyp"
+  ]
+}

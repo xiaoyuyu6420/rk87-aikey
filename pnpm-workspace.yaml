@@ -1,0 +1,5 @@
+allowBuilds:
+  electron: true
+  koffi: true
+  node-hid: true
+  esbuild: true

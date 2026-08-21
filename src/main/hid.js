@@ -1,0 +1,195 @@
+// HID 设备监听：检测 R87 Pro AI 的厂商自定义接口，解析按键报文
+// 协议见 docs/protocol.md（逆向自官方 RK-AI）
+
+const HID = require('node-hid');
+const { EventEmitter } = require('events');
+const { lookupKey } = require('./keymap');
+
+const TARGETS = [
+  { vid: 0x248a, pid: 0x8102, name: 'R87 Pro AI (有线)' },
+  // 蓝牙口(8243)专留给 KeySession（kb-session.js）——多句柄抢读会掐断命令会话
+];
+
+class KeyboardWatcher extends EventEmitter {
+  constructor() {
+    super();
+    this.devices = new Map(); // path -> HID instance
+    this.timer = null;
+    this.pressed = new Set(); // 去重：只认边沿触发
+    this.lastEvent = { code: -1, ts: 0 }; // 双连接(USB+BT同时活)去重
+    // 音频流去重：双连接可能重复推流，记录 (seq, 净荷头) 短窗口
+    this.audioDedup = [];
+    this.micOn = false;
+    this.audioWatchdog = null;
+  }
+
+  _feedAudioWatchdog() {
+    if (this.audioWatchdog) clearTimeout(this.audioWatchdog);
+    this.audioWatchdog = setTimeout(() => {
+      if (this.micOn) {
+        this.micOn = false;
+        this.emit('mic', { on: false });
+      }
+    }, 400);
+  }
+
+  start() {
+    this.scan();
+    this.timer = setInterval(() => this.scan(), 2000);
+  }
+
+  stop() {
+    if (this.timer) clearInterval(this.timer);
+    if (this.audioWatchdog) clearTimeout(this.audioWatchdog);
+    for (const [path, dev] of this.devices) {
+      try { dev.close(); } catch (_) {}
+    }
+    this.devices.clear();
+  }
+
+  scan() {
+    let list = [];
+    try { list = HID.devices(); } catch (_) { return; }
+
+    const wanted = new Set();
+    for (const d of list) {
+      // 只认厂商自定义 usage 页（和官方软件同样的过滤逻辑）
+      if (!(d.usagePage >= 0xff00 && d.usage >= 0x1000)) continue;
+      const t = TARGETS.find(t => t.vid === d.vendorId && t.pid === d.productId);
+      if (!t) continue;
+      if (this.devices.has(d.path)) { wanted.add(d.path); continue; }
+      try {
+        const dev = new HID.HID(d.path);
+        dev.on('data', buf => this.onData(d.path, buf));
+        dev.on('error', err => {
+          console.log(`[hid] ${d.path} 错误:`, err.message);
+          this.drop(d.path);
+        });
+        this.devices.set(d.path, dev);
+        wanted.add(d.path);
+        console.log(`[hid] 已打开 ${t.name} ${d.path}`);
+        this.emit('device', { connected: true, name: t.name });
+      } catch (e) {
+        console.log(`[hid] 打开失败 ${d.path}:`, e.message);
+      }
+    }
+
+    // 清理已拔出的设备
+    for (const [path, dev] of this.devices) {
+      if (!wanted.has(path)) this.drop(path);
+    }
+  }
+
+  drop(path) {
+    const dev = this.devices.get(path);
+    if (dev) {
+      try { dev.close(); } catch (_) {}
+      this.devices.delete(path);
+      this.emit('device', { connected: this.devices.size > 0 });
+    }
+  }
+
+  onData(path, buf) {
+    // 音频流报文（实测：reportId=0x1B，[0x1B, seq, ...60B 净荷]，15ms/包）
+    // 键盘语音键按住时固件自动开麦推流（伴随 cmd=106/107 状态上报）
+    if (buf[0] === 0x1b) {
+      const seq = buf[1];
+      const key = seq * 256 + (buf[2] + buf[3] * 256);
+      const now = Date.now();
+      this.audioDedup = this.audioDedup.filter(e => now - e.ts < 120);
+      if (this.audioDedup.some(e => e.key === key)) return;
+      this.audioDedup.push({ key, ts: now });
+      if (!this.micOn) {
+        this.micOn = true;
+        this.emit('mic', { on: true });
+      }
+      this._feedAudioWatchdog();
+      this.emit('audio', buf);
+      return;
+    }
+
+    const frame = decodeFrame(buf);
+    if (!frame) return;
+
+    // 麦克风开关状态上报（键盘语音键触发，非主机命令应答）
+    if (frame.cmd === 106) {
+      this._feedAudioWatchdog();
+      if (!this.micOn) {
+        this.micOn = true;
+        this.emit('mic', { on: true });
+      }
+      return;
+    }
+    if (frame.cmd === 107) {
+      if (this.audioWatchdog) clearTimeout(this.audioWatchdog);
+      if (this.micOn) {
+        this.micOn = false;
+        this.emit('mic', { on: false });
+      }
+      return;
+    }
+
+    // AI 模式切换键：独立命令 cmd=209(0xD1)，data 1=进入 / 0=退出（实测确认）
+    if (frame.cmd === 209 && frame.dataLen === 1) {
+      this.emit('ai-mode', { on: frame.data[0] === 1 });
+      return;
+    }
+
+    if (frame.cmd !== 159 || frame.dataLen !== 1) return;
+    const code = frame.data[0];
+
+    // 按下/抬起由键码表判定（keymap 里每个键位有 code/up 两个码）
+    const key = lookupKey(code);
+    if (!key) return;
+
+    const now = Date.now();
+    // 同一键 60ms 内的重复报文视为双连接重复，丢弃
+    if (this.lastEvent.code === code && now - this.lastEvent.ts < 60) return;
+    this.lastEvent = { code, ts: now };
+
+    if (key.phase === 'down') {
+      if (this.pressed.has(key.id)) return; // 长按重复报文，只触发一次
+      this.pressed.add(key.id);
+      this.emit('key', { code, keyId: key.id, phase: 'down' });
+    } else {
+      this.pressed.delete(key.id);
+      this.emit('key', { code, keyId: key.id, phase: 'up' });
+    }
+  }
+}
+
+// 帧解析：两种通道前缀 + RK 变体，见 docs/protocol.md 第 2 节
+function decodeFrame(e) {
+  const reportId = e[0];
+  try {
+    if (reportId === 0x05) {
+      let n;
+      if (e[1] === 0xfe) {
+        n = 2; // 通道 0: [05 FE C0 ...]
+      } else if (e[1] === 0xff && (e[2] === 0xf1 || e[2] === 0xf0) && e[3] === 0xfe) {
+        n = 4; // 通道 1/2: [05 FF Fx FE ...]
+      } else {
+        return null;
+      }
+      if (e[n] !== 0xc0) return null;
+      const cmd = e[n + 1];
+      const len = e[n + 2];
+      if (n + 3 + len >= e.length) return null;
+      if (e[n + 3 + len] !== 0xef) return null;
+      return { cmd, dataLen: len, data: e.slice(n + 3, n + 3 + len) };
+    }
+    if (reportId === 0x01) {
+      // RK 变体: [01 FA F2 FE C1 ...]
+      if (e[1] !== 0xfa || e[2] !== 0xf2 || e[3] !== 0xfe || e[4] !== 0xc1) return null;
+      const cmd = e[5];
+      const len = e[6];
+      if (7 + len >= e.length || e[7 + len] !== 0xef) return null;
+      return { cmd, dataLen: len, data: e.slice(7, 7 + len) };
+    }
+  } catch (_) {
+    return null;
+  }
+  return null;
+}
+
+module.exports = { KeyboardWatcher, decodeFrame, TARGETS };
