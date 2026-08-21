@@ -245,3 +245,34 @@ const e = Array.from({length: 32}, () => Math.floor(Math.random() * 256));
   除非固件未来 OTA 开放（观察点：新固件出现新 cmd 或 cmd 156/105 回包扩展字段）。
 - 若仅想做"灯效开关"实验：可尝试向 AI 会话发传统 cmd 102 帧观察键盘是否响应——
   官方代码从未这样做过，成功率低，属探索性质，不影响主功能。
+
+## 9. 固件与 OTA（2026-08-22 调查，决策：暂不深挖）
+
+### 9.1 官方固件获取链路（实测可用）
+
+- 版本查询：`GET http://mic.mimouse.net/dfs/hardware/judge/latest/version?type=mouse&system=win&deviceType=R87ProAI`
+  → `data.versionNum` + `data.bin.installName`。**deviceType 大小写敏感**（`R87ProAI` 命中；
+  `R87ProAIB`/hidType 值/PID 值均返回"没有上传最新的版本"）
+- 固件下载：`GET http://mic.mimouse.net/dfs/hardware/install/download?fileName=<installName>`
+  （参数名 `fileName`，N 大写；小写报 400）
+- 2026-08 时最新：`ota-r87proai-mouse_bin_1.1.4.6_small.zip`（2025-03-24 构建）
+
+### 9.2 固件包分析结论
+
+- 解压得 `ota-mouse.bin`（93700 字节）：**Telink 芯片固件**（内含字符串
+  `Telink Remote` / `MiMouse` / `R87Pro Ai` / `www.rkgaming.com/download/1/`）
+- 整体熵 6.4~7.1：未压缩未加密，可静态分析；0x4000~0x8000 为空白 flash
+- 无连续帧头立即数（协议帧逐字节比较），未发现现成 gamma/正弦灯表特征
+- 深挖瓶颈：Telink TC32 自研指令集，主流反编译器不直接支持
+
+### 9.3 OTA 传输协议（逆向自官方 `hid_core`，供参考勿乱用）
+
+- `startFwOta`：键盘固件与 dongle 固件两份镜像，`fwDataChannel` 0/1=键盘、2=接收器（dongle 也是独立 MCU）
+- 流程：cmd=8 OtaOpen（携带固件前 16 字节头）→ cmd=9 FwData（16 字节/包，offset 小端）→ cmd=11 Restart
+- ⚠️ 写错固件可变砖，本项目不实现固件刷写
+
+### 9.4 灯效后续可行路径（存档，当前不执行）
+
+1. **Fn 切灯抓包**（零风险）：键盘 Fn 切灯效时用 tools/listen.js 观察是否上报灯效状态帧，命中即得 cmd 号
+2. **安全号段盲测**：向 AI 会话试发传统协议 cmd 101/102（同厂 SDK 复用可能性）；避开 OTA(8-11)/改键(24)/恢复(25)
+3. **固件静态分析**：TC32 手工逆向，成本高，兜底
