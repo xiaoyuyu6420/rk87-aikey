@@ -1,4 +1,4 @@
-// 生成 256x256 应用图标 PNG（圆角深蓝底 + 键帽方块图案）
+// 生成 512x512 应用图标 PNG（圆角深蓝底 + 键帽方块图案；mac 构建要求 ≥512）
 const zlib = require('zlib');
 const fs = require('fs');
 
@@ -22,7 +22,7 @@ function chunk(type, data) {
   return Buffer.concat([len, td, crc]);
 }
 
-const S = 256, R = 48;
+const S = 512, R = 96;
 function pixel(x, y) {
   // 圆角矩形判定
   const x0 = 0, y0 = 0, x1 = S - 1, y1 = S - 1, r = R;
@@ -33,7 +33,7 @@ function pixel(x, y) {
   const g = Math.round(16 + (y / S) * 16);
   let r0 = g, g0 = g + 10, b0 = g + 38;
   // 图案：3x2 键帽方块，右下偏亮
-  const bw = 34, gap = 14;
+  const bw = 68, gap = 28;
   const ox = (S - (3 * bw + 2 * gap)) / 2;
   const oy = (S - (2 * bw + gap)) / 2;
   for (let i = 0; i < 3; i++) {
@@ -69,4 +69,4 @@ const png = Buffer.concat([
   chunk('IEND', Buffer.alloc(0)),
 ]);
 fs.writeFileSync('assets/icon.png', png);
-console.log('icon 256x256 OK', png.length, 'bytes');
+console.log('icon 512x512 OK', png.length, 'bytes');
