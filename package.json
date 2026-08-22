@@ -42,7 +42,10 @@
       "artifactName": "RK87-AIKey-${version}-portable.exe"
     },
     "mac": {
-      "target": [{ "target": "zip", "arch": ["arm64", "x64"] }],
+      "target": [
+        { "target": "zip", "arch": ["arm64", "x64"] },
+        { "target": "dmg", "arch": ["arm64", "x64"] }
+      ],
       "category": "public.app-category.utilities",
       "icon": "assets/icon.png",
       "identity": null
