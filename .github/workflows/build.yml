@@ -17,7 +17,7 @@ jobs:
           - os: windows-latest
             build_args: --win portable
           - os: macos-latest
-            build_args: --mac zip
+            build_args: --mac zip --x64 --arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
