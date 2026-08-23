@@ -69,7 +69,6 @@ class KeySession extends EventEmitter {
     this.rttAvg = 0;          // 心跳往返时间滑动平均（链路质量信号）
     this.rttBad = 0;          // 连续 RTT 超标次数
     this.pressed = new Set(); // 按键边沿去重
-    this.pressedTs = new Map(); // keyId -> 按下时刻（抬起看护用）
     this.rx = { std: 0, vendor: 0, audio: 0, other: 0 }; // 收包计数（诊断：区分报文断流 vs 注入失效）
     this._rxMark = { std: 0, vendor: 0, audio: 0, other: 0 };
     this._lastStatTs = Date.now();
@@ -122,11 +121,10 @@ class KeySession extends EventEmitter {
       this._readLoop();
       // 官方时序：open 后立即发一次心跳
       this._write(5, [], 'heartbeat-initial');
-      // 每秒心跳（保持会话；也是握手第一步）+ 语音停止看护 + 抬起看护
+      // 每秒心跳（保持会话；也是握手第一步）+ 语音停止看护 + 收包统计
       this.hbTimer = setInterval(() => {
         this._write(5, [], 'heartbeat');
         this._voiceStopGuard();
-        this._keyUpWatchdog();
         this._rxStats();
       }, 1000);
       // 握手超时：键盘不在此口上（如 dongle 插着但键盘走蓝牙）→ 换口
@@ -138,6 +136,7 @@ class KeySession extends EventEmitter {
       console.log(`[session] 尝试命令口 ${this.transport} ${bt ? '' : devInfo.path}`);
     } catch (e) {
       if (this.devPath) this.triedPaths.add(this.devPath); // 开口失败也换口（如被官方软件独占）
+      if (/already open|exclusive/i.test(e.message)) this._reopenDelay = 2000;
       this.emit('state', { connected: false, reason: 'open-failed: ' + e.message });
       this._scheduleReconnect();
     }
@@ -146,10 +145,14 @@ class KeySession extends EventEmitter {
   _scheduleReconnect() {
     if (this.stopped) return;
     if (this.watchTimer) return;
+    // 独占拒绝（already open）= 系统尚未释放旧句柄，固定 3s 会连续撞墙
+    // （v0.7.10 日志：曾因此反复失败几十秒）；命中一次多等 2s
+    const delay = 3000 + (this._reopenDelay || 0);
+    this._reopenDelay = 0;
     this.watchTimer = setTimeout(() => {
       this.watchTimer = null;
       this._open();
-    }, 3000);
+    }, delay);
   }
 
   _readLoop() {
@@ -306,23 +309,8 @@ class KeySession extends EventEmitter {
     }
   }
 
-  // 抬起看护：蓝牙劣化时 cmd=159 的抬起码会卡在缓冲/丢失——透传的 keyUp 发不出
-  // （输入法语音关不掉），且 pressed 残留导致下一次按下的 down 被边沿去重吞掉
-  // （长按唤不起，直到打字把缓冲冲开才恢复）。按下 >15s 仍无抬起视为丢失，
-  // 强制补发 up 事件走完整释放链路（透传 keyUp + mic 联动关麦）。
-  // 副作用：真按住超过 15s 会被误判松开（语音中断），微信语音单句很少超此限。
-  _keyUpWatchdog() {
-    if (this.pressedTs.size === 0) return;
-    const now = Date.now();
-    for (const [id, ts] of this.pressedTs) {
-      if (now - ts < 15000) continue;
-      const def = KEY_DEFS.find(d => d.id === id);
-      console.log(`[session] ${id} 抬起报文丢失（>15s），watchdog 强制释放`);
-      this.pressed.delete(id);
-      this.pressedTs.delete(id);
-      if (def) this.emit('key', { code: def.up, keyId: id, phase: 'up' });
-    }
-  }
+  // 抬起看护已移除：v0.7.10 日志实锤其触发全部为误杀（用户真在长按说话，
+  // 抬起码并未丢）。长按语音被掐断的主因是心跳误判断线，已在 _write 处修复。
 
   _handleKey(code) {
     const key = lookupKey(code);
@@ -333,11 +321,9 @@ class KeySession extends EventEmitter {
     if (key.phase === 'down') {
       if (this.pressed.has(key.id)) return;
       this.pressed.add(key.id);
-      this.pressedTs.set(key.id, Date.now());
       this.emit('key', { code, keyId: key.id, phase: 'down' });
     } else {
       this.pressed.delete(key.id);
-      this.pressedTs.delete(key.id);
       this.emit('key', { code, keyId: key.id, phase: 'up' });
     }
   }
@@ -354,7 +340,6 @@ class KeySession extends EventEmitter {
     this.rttAvg = 0;
     this.rttBad = 0;
     this.pressed.clear(); // 断线清按键状态，避免重连后边沿错乱
-    this.pressedTs.clear();
     kbdInject.reset();    // 回注侧同样清边沿（残留按下的键全部抬起）
     this.pendingHb = false;
     this.hbMiss = 0;
@@ -374,7 +359,11 @@ class KeySession extends EventEmitter {
       this.dev.write(frame(cmd, data, this.channel));
       // 心跳发出去后要求下个周期前有 104 回应；连续 3 次丢失 = 假在线，主动断开重连
       if (cmd === 5 && this.connected) {
-        if (this.pendingHb && ++this.hbMiss >= 3) {
+        // 长按语音时音频流（~60帧/s）占满读通道，104 回应会被挤延迟数秒——
+        // 这不是假在线。v0.7.10 日志实锤：两次「打字全挂」均为此因（误判断线
+        // → 句柄未及时释放 → exclusive access 瘫痪几十秒）。流活跃时不清心跳账。
+        const audioActive = this.lastAudioTs && Date.now() - this.lastAudioTs < 2000;
+        if (!audioActive && this.pendingHb && ++this.hbMiss >= 3) {
           this._onDisconnect('heartbeat-lost(3s无104)');
           return;
         }
