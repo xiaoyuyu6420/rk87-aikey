@@ -18,20 +18,28 @@
   </header>
 
   <main>
-    <section class="hint">
-      <p>① 按键盘上的「AI 切换」键进入/退出 AI 模式（F 行白灯亮） → ② 在下面对每个键配置动作 → ③ 按键即触发。</p>
-      <p class="sub">两种模式各配各的：比如普通模式 F10 留给输入法语音，AI 模式 F10 绑开麦+勾「保留原按键功能」。tab 上的数字 = 该模式已自定义的键数（初次两份相同是旧配置复制，改过哪份哪份就独立了）。键盘实际处于哪个模式看右侧徽章。直接按键盘上的键，对应行会闪烁高亮。双击行名称可改备注名。</p>
-    </section>
+    <nav class="page-nav">
+      <button class="page-tab active" data-page="keys">按键映射</button>
+      <button class="page-tab" data-page="stats">打字统计</button>
+    </nav>
 
-    <section class="mode-bar">
-      <div class="mode-tabs">
-        <button id="tab-fn" class="mode-tab active" data-mode="fn">普通模式</button>
-        <button id="tab-ai" class="mode-tab" data-mode="ai">AI 模式</button>
-      </div>
-      <span id="kb-mode-badge" class="badge">键盘：普通模式</span>
-    </section>
+    <div id="page-keys">
+      <section class="hint">
+        <p>① 按键盘上的「AI 切换」键进入/退出 AI 模式（F 行白灯亮） → ② 在下面对每个键配置动作 → ③ 按键即触发。</p>
+        <p class="sub">两种模式各配各的：比如普通模式 F10 留给输入法语音，AI 模式 F10 绑开麦+勾「保留原按键功能」。tab 上的数字 = 该模式已自定义的键数（初次两份相同是旧配置复制，改过哪份哪份就独立了）。键盘实际处于哪个模式看右侧徽章。直接按键盘上的键，对应行会闪烁高亮。双击行名称可改备注名。</p>
+      </section>
 
-    <section class="mic-card" id="mic-card">
+      <section class="mode-bar">
+        <div class="mode-tabs">
+          <button id="tab-fn" class="mode-tab active" data-mode="fn">普通模式</button>
+          <button id="tab-ai" class="mode-tab" data-mode="ai">AI 模式</button>
+        </div>
+        <span id="kb-mode-badge" class="badge">键盘：普通模式</span>
+      </section>
+
+      <div id="key-list"></div>
+
+      <section class="mic-card" id="mic-card">
       <div class="mic-head">
         <h2>键盘麦克风 → 虚拟麦克风</h2>
         <label><input type="checkbox" id="opt-mic-bridge" /> 启用桥接</label>
@@ -50,7 +58,9 @@
       <div class="mic-level"><div id="mic-level-bar"></div></div>
       <p class="sub">装虚拟声卡（Win: VB-Cable vb-audio.com/Cable ／ Mac: BlackHole existential.audio，brew install blackhole-2ch）→ 勾「启用桥接」→ 播放设备选 CABLE Input / BlackHole 2ch → 按住开麦键说话。系统默认输入设备选 CABLE Output / BlackHole 2ch，任意软件即可当麦克风用。</p>
     </section>
+    </div>
 
+    <div id="page-stats" hidden>
     <section class="stats-card" id="stats-card">
       <div class="mic-head">
         <h2>打字统计</h2>
@@ -75,8 +85,7 @@
       </div>
       <p class="sub">隐私：只记录每键计数与每日总数，不记录按键顺序、时间与应用信息，数据仅存本机（保留 90 天）。</p>
     </section>
-
-    <div id="key-list"></div>
+    </div>
   </main>
 
   <script src="app.js"></script>
