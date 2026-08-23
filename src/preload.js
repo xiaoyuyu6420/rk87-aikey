@@ -2,7 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('aikey', {
   getState: () => ipcRenderer.invoke('get-state'),
-  setBinding: (keyId, action) => ipcRenderer.invoke('set-binding', keyId, action),
+  setBinding: (keyId, action, mode) => ipcRenderer.invoke('set-binding', keyId, action, mode),
   setSettings: s => ipcRenderer.invoke('set-settings', s),
   testAction: a => ipcRenderer.invoke('test-action', a),
   pickProgram: () => ipcRenderer.invoke('pick-program'),
@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('aikey', {
   onMicPcm: cb => ipcRenderer.on('mic-pcm', (_e, buf) => cb(new Uint8Array(buf))),
   onMicState: cb => ipcRenderer.on('mic-state', (_e, on) => cb(on)),
   onSessionStatus: cb => ipcRenderer.on('session-status', (_e, on) => cb(on)),
+  onAiMode: cb => ipcRenderer.on('ai-mode', (_e, on) => cb(on)),
   micControl: on => ipcRenderer.invoke('mic-control', on),
   // 打字统计
   statsGet: () => ipcRenderer.invoke('stats-get'),

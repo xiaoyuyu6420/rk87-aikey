@@ -86,12 +86,14 @@ function boot() {
   });
   session.start();
 
-  // 非 AI 模式（mac）：F1-F12/PrtSc 走标准报文进回注模块；绑定了动作的键在此拦截。
+  // 普通（非 AI）模式（mac）：F1-F12/PrtSc 走标准报文进回注模块；绑定了动作的键在此拦截。
   // 返回 'block'=屏蔽原键、'passthrough'=动作+原键都触发、null=未绑定走原生回注
   kbdInject.setFnKeyPolicy(keyId => {
+    if (aiModeOn) onAiMode(false); // 功能键出现在标准报文 = 键盘实际处于普通模式
     const binding = (cfg.bindings && cfg.bindings[keyId]) || { type: 'none' };
     if (binding.type === 'none') return null;
     console.log(`[key] ${keyId} down（标准报文，已拦截）`);
+    if (win && !win.isDestroyed()) win.webContents.send('key-event', { keyId, phase: 'down' });
     const r = actions.run(binding);
     if (r && r.ok === false) console.log(`[action] ${keyId} 失败:`, r.error);
     return binding.passthrough === true ? 'passthrough' : 'block';
@@ -126,6 +128,7 @@ function onAiMode(on) {
   if (aiModeOn === on) return;
   aiModeOn = on;
   console.log(`[ai-mode] ${on ? '进入 AI 模式（功能键改走厂商码上报）' : '退出 AI 模式（功能键恢复标准报文）'}`);
+  if (win && !win.isDestroyed()) win.webContents.send('ai-mode', on);
   // 切换瞬间两条上报路径互换，按住中的键不会有对应的抬起报文：
   // 两侧边沿状态全部清空 + 已回注的键抬起，避免系统键状态卡住
   releasePassthrough();
@@ -142,6 +145,7 @@ function onKey({ code, keyId, phase }) {
   const now = Date.now();
   if (lastGlobalKey && lastGlobalKey.keyId === keyId && lastGlobalKey.phase === phase && now - lastGlobalKey.ts < 80) return;
   lastGlobalKey = { keyId, phase, ts: now };
+  if (!aiModeOn) onAiMode(true); // cmd=159 到达 = 键盘实际处于 AI 模式（209 事件可能在启动前已错过）
   const def = lookupKey(code) || { id: keyId, label: keyId };
   console.log(`[key] ${def.label} (${keyId}) ${phase}`);
   if (win && !win.isDestroyed()) {
@@ -153,7 +157,8 @@ function onKey({ code, keyId, phase }) {
     if (phase === 'down') session.askVoice();
     else session.stopVoice();
   }
-  const binding = (cfg.bindings && cfg.bindings[keyId]) || { type: 'none' };
+  // cmd=159 厂商码只在 AI 模式上报 → 此路径一律用 AI 模式绑定集
+  const binding = (cfg.bindingsAi && cfg.bindingsAi[keyId]) || { type: 'none' };
   // 动作只在按下触发
   if (phase === 'down' && binding.type !== 'none') {
     const result = actions.run(binding);
@@ -274,6 +279,7 @@ function showWindow() {
   win.webContents.on('did-finish-load', () => {
     win.webContents.send('device-status', deviceConnected);
     win.webContents.send('session-status', sessionOnline);
+    win.webContents.send('ai-mode', aiModeOn);
   });
 }
 
@@ -285,12 +291,14 @@ ipcMain.handle('get-state', () => ({
     code: k.code,
   })),
   bindings: cfg.bindings,
+  bindingsAi: cfg.bindingsAi,
   settings: cfg.settings,
   deviceConnected,
   sessionOnline,
+  aiMode: aiModeOn,
 }));
 
-ipcMain.handle('set-binding', (_e, keyId, action) => {
+ipcMain.handle('set-binding', (_e, keyId, action, mode = 'fn') => {
   // 界面里的"改备注名"走特殊键
   if (keyId.startsWith('__label__:')) {
     const id = keyId.slice('__label__:'.length);
@@ -299,7 +307,9 @@ ipcMain.handle('set-binding', (_e, keyId, action) => {
     config.save(cfg);
     return { ok: true };
   }
-  cfg.bindings[keyId] = action;
+  const set = mode === 'ai' ? 'bindingsAi' : 'bindings';
+  cfg[set] = cfg[set] || {};
+  cfg[set][keyId] = action;
   config.save(cfg);
   return { ok: true };
 });

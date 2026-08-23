@@ -38,6 +38,17 @@ main { padding: 16px 20px 40px; }
 
 #key-list { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
 
+/* 模式 tab + 键盘当前模式徽章 */
+.mode-bar { margin-top: 12px; display: flex; align-items: flex-end; justify-content: space-between; border-bottom: 1px solid #3a4050; }
+.mode-tabs { display: flex; gap: 4px; }
+.mode-tab {
+  padding: 7px 20px; border: 1px solid transparent; border-bottom: none; cursor: pointer;
+  background: transparent; color: var(--muted); font-size: 13px; border-radius: 8px 8px 0 0;
+  position: relative; top: 1px;
+}
+.mode-tab.active { background: #2a2f3a; color: var(--accent); font-weight: 600; border-color: #3a4050; }
+#kb-mode-badge.ai { background: rgba(79,140,255,.15); color: var(--accent); }
+
 .key-row {
   display: grid;
   grid-template-columns: 200px 120px 1fr auto;
