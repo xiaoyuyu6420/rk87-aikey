@@ -47,6 +47,12 @@ main { padding: 16px 20px 40px; }
   position: relative; top: 1px;
 }
 .mode-tab.active { background: #2a2f3a; color: var(--accent); font-weight: 600; border-color: #3a4050; }
+.mode-tab .cnt {
+  display: inline-block; min-width: 16px; margin-left: 6px; padding: 0 5px;
+  border-radius: 999px; background: rgba(79,140,255,.25); color: var(--accent);
+  font-size: 11px; line-height: 16px; text-align: center;
+}
+.mode-tab .cnt:empty { display: none; }
 #kb-mode-badge.ai { background: rgba(79,140,255,.15); color: var(--accent); }
 
 .key-row {
