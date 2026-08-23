@@ -9,7 +9,7 @@
 //   读帧同构（buf[5]=cmd），音频流 reportId=0x1B
 
 const { EventEmitter } = require('events');
-const { lookupKey } = require('./keymap');
+const { lookupKey, KEY_DEFS } = require('./keymap');
 const kbdInject = require('./kbd-inject');
 
 const VID = 0x248a;
@@ -69,6 +69,7 @@ class KeySession extends EventEmitter {
     this.rttAvg = 0;          // 心跳往返时间滑动平均（链路质量信号）
     this.rttBad = 0;          // 连续 RTT 超标次数
     this.pressed = new Set(); // 按键边沿去重
+    this.pressedTs = new Map(); // keyId -> 按下时刻（抬起看护用）
     this.lastKey = null;
     this.channel = 0xf1;      // 写帧通道前缀
     this.transport = '';      // '2.4G-dongle' | '蓝牙'
@@ -118,10 +119,11 @@ class KeySession extends EventEmitter {
       this._readLoop();
       // 官方时序：open 后立即发一次心跳
       this._write(5, [], 'heartbeat-initial');
-      // 每秒心跳（保持会话；也是握手第一步）+ 语音停止看护
+      // 每秒心跳（保持会话；也是握手第一步）+ 语音停止看护 + 抬起看护
       this.hbTimer = setInterval(() => {
         this._write(5, [], 'heartbeat');
         this._voiceStopGuard();
+        this._keyUpWatchdog();
       }, 1000);
       // 握手超时：键盘不在此口上（如 dongle 插着但键盘走蓝牙）→ 换口
       if (this.hsTimer) clearTimeout(this.hsTimer);
@@ -280,6 +282,24 @@ class KeySession extends EventEmitter {
     }
   }
 
+  // 抬起看护：蓝牙劣化时 cmd=159 的抬起码会卡在缓冲/丢失——透传的 keyUp 发不出
+  // （输入法语音关不掉），且 pressed 残留导致下一次按下的 down 被边沿去重吞掉
+  // （长按唤不起，直到打字把缓冲冲开才恢复）。按下 >15s 仍无抬起视为丢失，
+  // 强制补发 up 事件走完整释放链路（透传 keyUp + mic 联动关麦）。
+  // 副作用：真按住超过 15s 会被误判松开（语音中断），微信语音单句很少超此限。
+  _keyUpWatchdog() {
+    if (this.pressedTs.size === 0) return;
+    const now = Date.now();
+    for (const [id, ts] of this.pressedTs) {
+      if (now - ts < 15000) continue;
+      const def = KEY_DEFS.find(d => d.id === id);
+      console.log(`[session] ${id} 抬起报文丢失（>15s），watchdog 强制释放`);
+      this.pressed.delete(id);
+      this.pressedTs.delete(id);
+      if (def) this.emit('key', { code: def.up, keyId: id, phase: 'up' });
+    }
+  }
+
   _handleKey(code) {
     const key = lookupKey(code);
     if (!key) return;
@@ -289,9 +309,11 @@ class KeySession extends EventEmitter {
     if (key.phase === 'down') {
       if (this.pressed.has(key.id)) return;
       this.pressed.add(key.id);
+      this.pressedTs.set(key.id, Date.now());
       this.emit('key', { code, keyId: key.id, phase: 'down' });
     } else {
       this.pressed.delete(key.id);
+      this.pressedTs.delete(key.id);
       this.emit('key', { code, keyId: key.id, phase: 'up' });
     }
   }
@@ -308,6 +330,7 @@ class KeySession extends EventEmitter {
     this.rttAvg = 0;
     this.rttBad = 0;
     this.pressed.clear(); // 断线清按键状态，避免重连后边沿错乱
+    this.pressedTs.clear();
     kbdInject.reset();    // 回注侧同样清边沿（残留按下的键全部抬起）
     this.pendingHb = false;
     this.hbMiss = 0;
