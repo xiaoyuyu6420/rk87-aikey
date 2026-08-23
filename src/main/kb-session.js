@@ -65,6 +65,9 @@ class KeySession extends EventEmitter {
     this.lastAudioTs = 0;     // 最近一次音频流帧时间（语音推流活跃信号）
     this._stopGuardTs = 0;    // 请求停止推流的时刻（停止看护）
     this._stuckRetry = 0;     // 停止命令重发次数
+    this._hbTs = 0;           // 最近一次心跳写出时刻（RTT 测量）
+    this.rttAvg = 0;          // 心跳往返时间滑动平均（链路质量信号）
+    this.rttBad = 0;          // 连续 RTT 超标次数
     this.pressed = new Set(); // 按键边沿去重
     this.lastKey = null;
     this.channel = 0xf1;      // 写帧通道前缀
@@ -181,6 +184,21 @@ class KeySession extends EventEmitter {
     if (cmd === 104) {
       this.pendingHb = false;
       this.hbMiss = 0;
+      // 心跳 RTT：链路质量信号。蓝牙劣化（如语音后连接参数未恢复）时打字报文
+      // 延迟抖动/丢失（漏字、顺序错乱、手感发黏），但心跳仍在回应、假在线检测
+      // 抓不到——用 RTT 连续超标判定劣化，主动重连恢复链路
+      if (this._hbTs) {
+        const rtt = Date.now() - this._hbTs;
+        this._hbTs = 0;
+        this.rttAvg = this.rttAvg ? this.rttAvg * 0.6 + rtt * 0.4 : rtt;
+        if (this.rttAvg > 250 && ++this.rttBad >= 5) {
+          console.log(`[session] 链路劣化（心跳 RTT 平均 ${Math.round(this.rttAvg)}ms），强制重连`);
+          this.rttBad = 0;
+          this._onDisconnect('link-degraded');
+          return;
+        }
+        if (this.rttAvg <= 250) this.rttBad = 0;
+      }
       if (!this.got104) {
         this.got104 = true;
         // 官方 onHid_ReplyHeartBeat：首次心跳回应 → 启动验证
@@ -286,6 +304,9 @@ class KeySession extends EventEmitter {
     this.micOn = false;
     this._stopGuardTs = 0;
     this._stuckRetry = 0;
+    this._hbTs = 0;
+    this.rttAvg = 0;
+    this.rttBad = 0;
     this.pressed.clear(); // 断线清按键状态，避免重连后边沿错乱
     kbdInject.reset();    // 回注侧同样清边沿（残留按下的键全部抬起）
     this.pendingHb = false;
@@ -311,6 +332,7 @@ class KeySession extends EventEmitter {
           return;
         }
         this.pendingHb = true;
+        this._hbTs = Date.now();
       }
     } catch (e) {
       this._onDisconnect('write-failed(' + tag + '): ' + e.message);
