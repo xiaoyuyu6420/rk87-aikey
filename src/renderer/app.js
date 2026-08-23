@@ -33,6 +33,7 @@ async function init() {
 
   renderList();
   initModeTabs();
+  initProfiles();
   initPageNav();
 
   initMicBridge();
@@ -103,6 +104,171 @@ function updateTabCounts() {
 }
 
 const bindingsOf = () => (currentMode === 'ai' ? state.bindingsAi : state.bindings) || {};
+
+// ---------- 配置档（多套键位一键切换 + 前台应用自动切档） ----------
+function initProfiles() {
+  renderProfileChips();
+  initAppRules();
+  // 主进程切档（托盘/自动/按键循环/删档回落）→ 拉新投影整体刷新
+  window.aikey.onProfileChanged(async d => {
+    state = await window.aikey.getState();
+    renderProfileChips();
+    renderList();
+    updateTabCounts();
+    if (d.reason === 'del') toast(`档已删除，回落到「${d.name}」`);
+    else if (d.reason !== 'manual') toast(`已切到「${d.name}」档`);
+  });
+}
+
+function renderProfileChips() {
+  const box = document.getElementById('profile-chips');
+  const p = state.profiles || { order: ['default'], names: { default: '默认' }, activeId: 'default', max: 5 };
+  box.innerHTML = '';
+  for (const id of p.order) {
+    const chip = document.createElement('button');
+    chip.className = 'profile-chip' + (id === p.activeId ? ' active' : '');
+    chip.title = id === p.activeId ? '当前档' : '点击切换到此档';
+    const label = document.createElement('span');
+    label.textContent = p.names[id] || id;
+    chip.appendChild(label);
+    if (id !== 'default') {
+      const del = document.createElement('span');
+      del.className = 'chip-del';
+      del.textContent = '✕';
+      del.title = '删除此档（默认档不可删）';
+      del.onclick = async e => {
+        e.stopPropagation();
+        if (!confirm(`删除档「${p.names[id]}」？该档键位与关联的自动切档规则一并删除。`)) return;
+        const r = await window.aikey.profileOp({ op: 'del', id });
+        if (r && r.ok === false) toast(r.error, true);
+      };
+      chip.appendChild(del);
+    }
+    chip.onclick = async () => {
+      if (id === p.activeId) return;
+      const r = await window.aikey.profileOp({ op: 'set-active', id });
+      if (r && r.ok) {
+        state = await window.aikey.getState(); // bindings 已是新档投影
+        renderProfileChips();
+        renderList();
+        updateTabCounts();
+      } else if (r) toast(r.error, true);
+    };
+    chip.ondblclick = () => { // 行内重命名（Electron 无 window.prompt）
+      chip.innerHTML = '';
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = p.names[id] || '';
+      chip.appendChild(input);
+      input.focus(); input.select();
+      const commit = async () => {
+        const name = input.value.trim();
+        if (name && name !== p.names[id]) {
+          const r = await window.aikey.profileOp({ op: 'rename', id, name });
+          if (r && r.ok) state.profiles = r.profiles;
+        }
+        renderProfileChips();
+      };
+      input.onblur = commit;
+      input.onkeydown = e => { if (e.key === 'Enter') input.blur(); if (e.key === 'Escape') { input.value = ''; input.blur(); } };
+    };
+    box.appendChild(chip);
+  }
+  const add = document.createElement('button');
+  add.className = 'profile-chip add';
+  add.textContent = '＋';
+  add.title = p.order.length >= p.max ? `已达上限（${p.max} 档）` : '新增档（复制当前档键位，双击可改名）';
+  add.disabled = p.order.length >= p.max;
+  add.onclick = async () => {
+    const r = await window.aikey.profileOp({ op: 'add', name: `档${p.order.length + 1}` });
+    if (r && r.ok) {
+      state.profiles = r.profiles;
+      renderProfileChips();
+      toast('已新增档（复制了当前档键位），双击档名可改');
+    } else if (r) toast(r.error, true);
+  };
+  box.appendChild(add);
+}
+
+// 前台应用自动切档规则：进程名 → 档位
+function initAppRules() {
+  const box = document.getElementById('app-rules');
+  const addBtn = document.getElementById('rule-add');
+  if (state.profiles && state.profiles.fgSupported === false) {
+    document.getElementById('fg-platform-hint').textContent = '（自动检测仅 Windows，此处规则在 mac 上不生效）';
+  }
+
+  const save = async () => {
+    const p = state.profiles;
+    const rules = [];
+    box.querySelectorAll('.rule-row').forEach(row => {
+      const name = row.querySelector('.rule-name').value.trim().toLowerCase();
+      const profileId = row.querySelector('.rule-profile').value;
+      if (name && p.order.includes(profileId)) rules.push({ profileId, name });
+    });
+    const r = await window.aikey.profileOp({ op: 'set-rules', rules });
+    if (r && r.ok) state.profiles = r.profiles;
+  };
+
+  const renderRules = () => {
+    const p = state.profiles;
+    box.innerHTML = '';
+    const rules = (p && p.appRules) || [];
+    for (const rule of rules) {
+      const row = document.createElement('div');
+      row.className = 'rule-row';
+      const name = document.createElement('input');
+      name.className = 'rule-name';
+      name.type = 'text';
+      name.placeholder = '进程名，如 wechat.exe';
+      name.value = rule.name;
+      name.onblur = save;
+      const sel = document.createElement('select');
+      sel.className = 'rule-profile';
+      for (const id of p.order) {
+        const o = document.createElement('option');
+        o.value = id; o.textContent = p.names[id] || id;
+        sel.appendChild(o);
+      }
+      sel.value = rule.profileId;
+      sel.onchange = save;
+      const del = document.createElement('button');
+      del.className = 'ghost-btn';
+      del.textContent = '✕';
+      del.onclick = () => { row.remove(); save(); };
+      row.append(name, sel, del);
+      box.appendChild(row);
+    }
+    if (!rules.length) {
+      const empty = document.createElement('span');
+      empty.className = 'none-hint';
+      empty.textContent = '还没有规则——点「添加规则」选一个程序（或手填进程名如 game.exe），切到该程序时自动换键位档';
+      box.appendChild(empty);
+    }
+  };
+
+  addBtn.onclick = async () => {
+    const p = state.profiles;
+    let name = '';
+    try {
+      const path = await window.aikey.pickProgram();
+      if (path) name = (path.split(/[\\/]/).pop() || '').toLowerCase();
+    } catch (_) { /* 选择器失败走手填 */ }
+    if (name) {
+      const r = await window.aikey.profileOp({ op: 'set-rules', rules: [...(p.appRules || []), { profileId: p.activeId, name }] });
+      if (r && r.ok) state.profiles = r.profiles;
+      renderRules();
+    } else {
+      p.appRules = [...(p.appRules || []), { profileId: p.activeId, name: '' }];
+      renderRules();
+      const rows = box.querySelectorAll('.rule-row');
+      const last = rows[rows.length - 1];
+      if (last) last.querySelector('.rule-name').focus();
+    }
+  };
+  renderRules();
+}
+
 
 function renderList() {
   const list = document.getElementById('key-list');

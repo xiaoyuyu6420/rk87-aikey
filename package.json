@@ -15,7 +15,7 @@
     "listen": "node tools/listen.js",
     "dist": "electron-builder --win",
     "dist:mac": "electron-builder --mac zip",
-    "test": "node tests/kb-session-fixes.test.js && node tests/downdown-heal.test.js"
+    "test": "node tests/kb-session-fixes.test.js && node tests/downdown-heal.test.js && node tests/profiles.test.js"
   },
   "devDependencies": {
     "electron": "^33.0.0",

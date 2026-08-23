@@ -208,3 +208,25 @@ button.capturing {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .hm-key.hot { color: var(--text); border-color: transparent; }
+
+/* ---------- 配置档档位条 + 前台自动切档规则 ---------- */
+.profile-bar { display: flex; align-items: center; gap: 10px; margin: 0 0 6px; }
+.profile-bar .sub { font-size: 12px; }
+.profile-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.profile-chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px;
+  background: var(--card); border: 1px solid var(--line); color: var(--muted);
+  border-radius: 999px; font-size: 13px; cursor: pointer;
+}
+.profile-chip.active { color: var(--accent); border-color: var(--accent); background: rgba(79,140,255,.12); font-weight: 600; }
+.profile-chip.add { padding: 4px 10px; }
+.profile-chip.add:disabled { opacity: .4; cursor: not-allowed; }
+.chip-del { color: var(--muted); font-size: 11px; padding: 0 2px; }
+.chip-del:hover { color: #ff6b6b; }
+.profile-chip input {
+  width: 90px; background: var(--bg); color: var(--text); border: 1px solid var(--accent);
+  border-radius: 999px; padding: 2px 8px; font-size: 13px;
+}
+.rule-row { display: flex; gap: 8px; margin: 4px 0; align-items: center; }
+.rule-row .rule-name { flex: 1; }
+.rule-row .rule-profile { flex: 0 0 auto; min-width: 100px; }

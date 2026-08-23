@@ -15,6 +15,9 @@ contextBridge.exposeInMainWorld('aikey', {
   onAiMode: cb => ipcRenderer.on('ai-mode', (_e, on) => cb(on)),
   onBattery: cb => ipcRenderer.on('battery', (_e, b) => cb(b)),
   micControl: on => ipcRenderer.invoke('mic-control', on),
+  // 配置档（多套键位 + 前台应用自动切档）
+  profileOp: payload => ipcRenderer.invoke('profile-op', payload),
+  onProfileChanged: cb => ipcRenderer.on('profile-changed', (_e, data) => cb(data)),
   // 打字统计
   statsGet: () => ipcRenderer.invoke('stats-get'),
 });

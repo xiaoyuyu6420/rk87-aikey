@@ -29,6 +29,11 @@
         <p class="sub">两种模式各配各的：比如普通模式 F10 留给输入法语音，AI 模式 F10 绑开麦+勾「保留原按键功能」。tab 上的数字 = 该模式已自定义的键数（初次两份相同是旧配置复制，改过哪份哪份就独立了）。键盘实际处于哪个模式看右侧徽章。直接按键盘上的键，对应行会闪烁高亮。双击行名称可改备注名。</p>
       </section>
 
+      <section class="profile-bar">
+        <div class="profile-chips" id="profile-chips"></div>
+        <span class="sub" id="profile-hint">多套键位一键切换；双击档名重命名</span>
+      </section>
+
       <section class="mode-bar">
         <div class="mode-tabs">
           <button id="tab-fn" class="mode-tab active" data-mode="fn">普通模式</button>
@@ -37,8 +42,20 @@
         <span id="kb-mode-badge" class="badge">键盘：普通模式</span>
         <span id="battery-badge" class="badge" hidden></span>
       </section>
+        <span id="kb-mode-badge" class="badge">键盘：普通模式</span>
+        <span id="battery-badge" class="badge" hidden></span>
+      </section>
 
       <div id="key-list"></div>
+
+      <section class="mic-card">
+      <div class="mic-head">
+        <h2>前台应用自动切档 <small id="fg-platform-hint"></small></h2>
+        <button id="rule-add" class="ghost-btn">＋ 添加规则</button>
+      </div>
+      <div id="app-rules"></div>
+      <p class="sub">按前台进程名（exe 名，不区分大小写）自动切换键位档；手动切档后，前台应用不变期间不会被自动接管。仅 Windows 支持自动检测，mac 请用托盘或按键手动切档。</p>
+    </section>
 
       <section class="mic-card" id="mic-card">
       <div class="mic-head">

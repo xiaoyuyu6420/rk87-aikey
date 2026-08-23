@@ -1,15 +1,19 @@
 // 配置读写：userData/config.json，无第三方依赖
+// 0.9.0 起支持多配置档（profiles）：bindingsByProfile 是唯一真源，
+// 顶层 bindings/bindingsAi 是 active 档内部对象的引用投影（同一对象引用），
+// 主进程读写 cfg.bindings 即读写 active 档，旧代码零改动。
 
 const fs = require('fs');
 const path = require('path');
 const { app } = require('electron');
-const { KEY_DEFS } = require('./keymap');
+
+const MAX_PROFILES = 5;
 
 const DEFAULTS = {
-  // bindings: keyId -> action（普通模式，形状见 actions.js 注释）
-  // bindingsAi: keyId -> action（AI 模式，独立于普通模式配置）
-  bindings: {},
-  bindingsAi: {},
+  // 顶层 bindings/bindingsAi 由 projectActive() 投影生成（= active 档的引用）
+  profiles: { order: ['default'], activeId: 'default', names: { default: '默认' } },
+  bindingsByProfile: { default: { bindings: {}, bindingsAi: {} } },
+  appRules: [], // [{ profileId, name }]（按前台进程 exe 基名小写匹配，仅 Windows）
   settings: {
     triggerOnUp: false,       // 预留：在抬起时触发（默认按下即触发）
     micBridgeEnabled: false,  // 键盘麦克风 → 虚拟声卡桥接
@@ -28,22 +32,83 @@ function configPath() {
   return path.join(app.getPath('userData'), 'config.json');
 }
 
-function load() {
-  try {
-    const raw = fs.readFileSync(configPath(), 'utf8');
-    const cfg = JSON.parse(raw);
+// 旧格式（无 profiles 字段）→ 新格式。纯函数，跑 N 次结果一致（幂等）。
+function migrateRaw(raw) {
+  raw = raw || {};
+  if (raw.profiles && Array.isArray(raw.profiles.order) && raw.profiles.order.length) {
+    // 新格式：防御性补齐（幽灵档过滤 / activeId 回落 / names 兜底）
+    const stored = raw.bindingsByProfile || {};
+    const order = raw.profiles.order.filter(id => stored[id]);
+    if (!order.includes('default')) order.unshift('default');
+    const bindingsByProfile = {};
+    for (const id of order) {
+      const p = stored[id] || {};
+      bindingsByProfile[id] = { bindings: p.bindings || {}, bindingsAi: p.bindingsAi || {} };
+    }
+    let activeId = raw.profiles.activeId;
+    if (!order.includes(activeId)) activeId = 'default';
+    const names = { default: '默认' };
+    for (const id of order) {
+      names[id] = (raw.profiles.names && raw.profiles.names[id]) || (id === 'default' ? '默认' : id);
+    }
     return {
-      bindings: { ...cfg.bindings },
-      bindingsAi: { ...(cfg.bindingsAi || cfg.bindings || {}) },
-      labels: { ...(cfg.labels || {}) },
-      settings: { ...DEFAULTS.settings, ...(cfg.settings || {}) },
+      profiles: { order, activeId, names },
+      bindingsByProfile,
+      appRules: Array.isArray(raw.appRules)
+        ? raw.appRules.filter(r => r && r.profileId && r.name && order.includes(r.profileId))
+        : [],
     };
+  }
+  // 旧格式：现有键位整体拷入 default 档（bindingsAi 兜底逻辑与历史 load 行为一致）
+  return {
+    profiles: { order: ['default'], activeId: 'default', names: { default: '默认' } },
+    bindingsByProfile: {
+      default: {
+        bindings: raw.bindings || {},
+        bindingsAi: raw.bindingsAi || raw.bindings || {},
+      },
+    },
+    appRules: [],
+  };
+}
+
+// 投影：让顶层 bindings/bindingsAi 指向 active 档内部对象（引用共享，写即同步）
+function projectActive(cfg) {
+  const id = cfg.bindingsByProfile[cfg.profiles.activeId] ? cfg.profiles.activeId : 'default';
+  cfg.profiles.activeId = id;
+  cfg.bindings = cfg.bindingsByProfile[id].bindings;
+  cfg.bindingsAi = cfg.bindingsByProfile[id].bindingsAi;
+}
+
+// 迁移前备份（仅首次：.bak 不存在才写）
+function backupOnce() {
+  try {
+    const p = configPath();
+    if (fs.existsSync(p) && !fs.existsSync(p + '.bak')) fs.copyFileSync(p, p + '.bak');
+  } catch (_) { /* 备份失败不阻塞迁移（load 有 .corrupt 兜底） */ }
+}
+
+function load() {
+  let raw = null;
+  try {
+    raw = JSON.parse(fs.readFileSync(configPath(), 'utf8'));
   } catch (e) {
     // 损坏（写一半崩溃/磁盘错误）时留证并重建，避免用户绑定静默清零无法排查
     try { fs.renameSync(configPath(), configPath() + '.corrupt'); } catch (_) {}
     console.log('[config] 读取失败已重建（原文件存为 .corrupt）:', e.message);
-    return JSON.parse(JSON.stringify(DEFAULTS));
+    const cfg = JSON.parse(JSON.stringify(DEFAULTS));
+    projectActive(cfg);
+    return cfg;
   }
+  const legacy = !(raw.profiles && Array.isArray(raw.profiles.order) && raw.profiles.order.length);
+  if (legacy) backupOnce();
+  const cfg = {
+    ...migrateRaw(raw),
+    labels: { ...(raw.labels || {}) },
+    settings: { ...DEFAULTS.settings, ...(raw.settings || {}) },
+  };
+  projectActive(cfg);
+  return cfg;
 }
 
 function save(cfg) {
@@ -55,8 +120,55 @@ function save(cfg) {
   fs.renameSync(tmp, configPath());
 }
 
+// ---------- 档操作（纯数据操作，供 IPC 层调用） ----------
+
+function addProfile(cfg, name) {
+  if (cfg.profiles.order.length >= MAX_PROFILES) return null;
+  const id = 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+  cfg.profiles.order.push(id);
+  cfg.profiles.names[id] = String(name || '').slice(0, 12) || `档${cfg.profiles.order.length}`;
+  // 新档复制当前档键位（常见诉求：在现有基础上微调）
+  cfg.bindingsByProfile[id] = JSON.parse(JSON.stringify({
+    bindings: cfg.bindings,
+    bindingsAi: cfg.bindingsAi,
+  }));
+  return id;
+}
+
+function renameProfile(cfg, id, name) {
+  if (!cfg.bindingsByProfile[id]) return false;
+  cfg.profiles.names[id] = String(name || '').slice(0, 12) || cfg.profiles.names[id];
+  return true;
+}
+
+// 删除档：default 不可删；级联清理 appRules；删 active 先回落 default。
+// 返回切换后的 activeId（未删 active 则返回原值），失败返回 null。
+function delProfile(cfg, id) {
+  if (id === 'default' || !cfg.bindingsByProfile[id]) return null;
+  delete cfg.bindingsByProfile[id];
+  cfg.profiles.order = cfg.profiles.order.filter(x => x !== id);
+  delete cfg.profiles.names[id];
+  cfg.appRules = cfg.appRules.filter(r => r.profileId !== id);
+  let activeId = cfg.profiles.activeId;
+  if (activeId === id) {
+    activeId = 'default';
+    setActive(cfg, activeId);
+  }
+  return activeId;
+}
+
+function setActive(cfg, id) {
+  if (!cfg.bindingsByProfile[id]) return false;
+  cfg.profiles.activeId = id;
+  projectActive(cfg);
+  return true;
+}
+
 function defaultBinding(keyId) {
   return { type: 'none' };
 }
 
-module.exports = { load, save, defaultBinding, DEFAULTS };
+module.exports = {
+  load, save, defaultBinding, DEFAULTS, MAX_PROFILES,
+  migrateRaw, projectActive, addProfile, renameProfile, delProfile, setActive,
+};

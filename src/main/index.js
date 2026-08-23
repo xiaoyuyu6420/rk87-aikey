@@ -10,6 +10,7 @@ const { KeySession } = require('./kb-session');
 const { lookupKey, allKeys } = require('./keymap');
 const { MicPipeline } = require('./mic');
 const { TypingStats } = require('./stats');
+const { FgWatcher } = require('./fgwatch');
 const actions = require('./actions');
 const kbdInject = require('./kbd-inject');
 const config = require('./config');
@@ -29,6 +30,8 @@ let pcmBatchTimer = null;
 let psBlockerId = null;    // 推流期电源阻塞（防 App Nap 拖慢主进程 timer）
 let audioDedup = [];       // 双连接（USB+蓝牙）重复音频帧去重（短窗）
 let lowBatNotified = false; // 低电量一次性提醒（充电/回血后重新武装）
+let fg = null;              // 前台应用检测（配置档自动切档事件源，规则空时零开销）
+let manualAtProc = null;    // 手动切档时的前台进程名（null=无 override，自动规则可接管）
 
 // 常驻托盘应用：瞬时异常（如 stdout 管道断开的 EPIPE）不崩溃退出
 process.on('uncaughtException', e => {
@@ -189,6 +192,17 @@ function boot() {
   };
   if (cfg.settings.statsEnabled !== false) stats.start();
 
+  // 键位动作里的系统操作（profile-cycle：按键循环切档）
+  actions.setSysHandler(op => {
+    if (op === 'profile-cycle') { cycleProfile(); return { ok: true }; }
+    return { ok: false, error: `未知系统动作 ${op}` };
+  });
+
+  // 前台应用检测 → 配置档自动切档（appRules 为空时不启动，零开销）
+  fg = new FgWatcher();
+  fg.onChange = onFgChange;
+  syncFgWatcher();
+
   // 精简 macOS 菜单栏：默认 7 项菜单太宽，刘海屏上会把右侧菜单栏图标挤掉；
   // 只留 app 名 + Edit（输入框的复制/粘贴/全选快捷键依赖 editMenu）
   if (process.platform === 'darwin') {
@@ -205,6 +219,59 @@ function boot() {
 }
 
 let aiModeOn = false;
+
+// ---------- 配置档切换 ----------
+// 切档 = 换 activeId + 重新投影（顶层 bindings 引用指向新档）+ 落盘 + 托盘/界面同步
+function switchProfile(id, reason) {
+  if (!config.setActive(cfg, id)) return false;
+  config.save(cfg);
+  rebuildTrayMenu();
+  console.log(`[profile] 切到「${cfg.profiles.names[id] || id}」（${reason}）`);
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('profile-changed', { id, reason, name: cfg.profiles.names[id] || id });
+  }
+  return true;
+}
+
+// 手动切档（托盘/界面/按键循环）：记 override——切档时的前台进程不变期间，
+// 自动规则不接管；前台换到别的进程后恢复自动
+function manualSwitch(id) {
+  if (switchProfile(id, 'manual') && fg) manualAtProc = fg.lastProc;
+}
+
+function cycleProfile() {
+  const order = cfg.profiles.order;
+  const next = order[(order.indexOf(cfg.profiles.activeId) + 1) % order.length];
+  if (next) manualSwitch(next);
+}
+
+function onFgChange(proc) {
+  if (manualAtProc !== null) {
+    if (proc !== manualAtProc) manualAtProc = null; // 前台已换进程，恢复自动接管
+    else return; // 用户手动选择仍有效
+  }
+  const rule = (cfg.appRules || []).find(r => String(r.name).toLowerCase() === proc);
+  if (rule && rule.profileId !== cfg.profiles.activeId) switchProfile(rule.profileId, `自动：${proc}`);
+}
+
+// 有规则才启动前台检测；规则空/全失效则停（开关关闭零开销）
+function syncFgWatcher() {
+  const rules = (cfg.appRules || []).filter(r => cfg.profiles.order.includes(r.profileId));
+  if (rules.length) fg.start();
+  else fg.stop();
+}
+
+function profilesState() {
+  return {
+    order: cfg.profiles.order,
+    names: cfg.profiles.names,
+    activeId: cfg.profiles.activeId,
+    appRules: cfg.appRules,
+    max: config.MAX_PROFILES,
+    fgSupported: fg ? fg.supported : false,
+  };
+}
+
 // AI 模式切换：功能键从标准报文切到厂商码上报（或切回），影响透传/拦截路径的选择
 function onAiMode(on) {
   if (aiModeOn === on) return;
@@ -406,6 +473,12 @@ function rebuildTrayMenu() {
     { label: (deviceConnected || sessionOnline) ? '键盘：已连接' : '键盘：未连接', enabled: false },
     { label: sessionOnline ? `麦克风会话：在线${session && session.transport ? '（' + session.transport + '）' : ''}` : '麦克风会话：离线', enabled: false },
     { label: '重连键盘', click: () => { if (session) session.reconnect(); } },
+    { label: '键位档', submenu: cfg.profiles.order.map(id => ({
+      label: cfg.profiles.names[id] || id,
+      type: 'radio',
+      checked: id === cfg.profiles.activeId,
+      click: () => manualSwitch(id),
+    })) },
     { label: '打开日志文件夹', click: () => shell.openPath(path.join(app.getPath('userData'), 'logs')) },
     { label: '退出官方 RK-AI', click: () => { exitOfficialRKAI(); } },
     { label: '开机自启', type: 'checkbox', checked: !!(cfg.settings && cfg.settings.autostart), click: mi => {
@@ -467,6 +540,7 @@ ipcMain.handle('get-state', () => ({
   bindings: cfg.bindings,
   bindingsAi: cfg.bindingsAi,
   settings: cfg.settings,
+  profiles: profilesState(),
   deviceConnected,
   sessionOnline,
   aiMode: aiModeOn,
@@ -516,6 +590,49 @@ ipcMain.handle('mic-control', (_e, on) => {
 
 ipcMain.handle('test-action', (_e, action) => actions.run(action));
 
+// 配置档操作：add / rename / del / set-active / set-rules
+ipcMain.handle('profile-op', (_e, payload) => {
+  const { op } = payload || {};
+  switch (op) {
+    case 'add': {
+      const id = config.addProfile(cfg, payload.name);
+      if (!id) return { ok: false, error: `最多 ${config.MAX_PROFILES} 档` };
+      config.save(cfg);
+      rebuildTrayMenu();
+      return { ok: true, id, profiles: profilesState() };
+    }
+    case 'rename':
+      if (!config.renameProfile(cfg, payload.id, payload.name)) return { ok: false, error: '档不存在' };
+      config.save(cfg);
+      rebuildTrayMenu();
+      return { ok: true, profiles: profilesState() };
+    case 'del': {
+      const back = config.delProfile(cfg, payload.id);
+      if (back === null) return { ok: false, error: '默认档不可删' };
+      config.save(cfg);
+      rebuildTrayMenu();
+      syncFgWatcher();
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('profile-changed', { id: cfg.profiles.activeId, reason: 'del', name: cfg.profiles.names[cfg.profiles.activeId] });
+      }
+      return { ok: true, profiles: profilesState() };
+    }
+    case 'set-active':
+      if (!manualSwitch(payload.id)) return { ok: false, error: '档不存在' };
+      return { ok: true, profiles: profilesState() };
+    case 'set-rules': {
+      cfg.appRules = (Array.isArray(payload.rules) ? payload.rules : [])
+        .filter(r => r && cfg.profiles.order.includes(r.profileId) && String(r.name || '').trim())
+        .map(r => ({ profileId: r.profileId, name: String(r.name).trim().slice(0, 64) }));
+      config.save(cfg);
+      syncFgWatcher();
+      return { ok: true, profiles: profilesState() };
+    }
+    default:
+      return { ok: false, error: `未知操作 ${op}` };
+  }
+});
+
 ipcMain.handle('pick-program', async () => {
   const { dialog } = require('electron');
   const r = await dialog.showOpenDialog(win, {
@@ -533,4 +650,5 @@ app.on('before-quit', () => {
   if (watcher) watcher.stop();
   if (session) session.stop(); // 推流中途退出会先补发 cmd=4 停麦再关句柄
   if (stats) stats.stop(); // 统计落盘
+  if (fg) fg.stop();
 });
