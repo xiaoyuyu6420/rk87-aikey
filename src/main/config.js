@@ -25,6 +25,10 @@ const DEFAULTS = {
     statsEnabled: true,      // 打字统计（只记每键计数与每日总数，纯本地 stats.json）
     fatigueEnabled: true,    // 疲劳提醒（连续打字满阈值弹系统通知）
     fatigueMinutes: 25,      // 疲劳提醒阈值（分钟）
+    soundEnabled: false,     // 打字音效（隐藏页 Web Audio 播放，关闭时窗口不创建零开销）
+    soundPack: 'blue',       // 音色：blue 青轴 / membrane 薄膜 / typewriter 打字机 / custom 自选目录
+    soundVolume: 0.5,        // 音量 0-1
+    soundCustomDir: '',      // 自选 wav 目录（soundPack=custom 时生效，目录内 wav 随机播放）
   },
 };
 

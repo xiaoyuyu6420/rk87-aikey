@@ -39,6 +39,8 @@ class TypingStats {
     this.started = false;
     this.loaded = false;
     this.dirty = false;
+    this.counting = true;      // 是否计数（统计关但音效开时轮询照跑、计数跳过）
+    this.onKeystroke = null;   // 击键边沿回调（打字音效事件源；null=无订阅零开销）
     this.lastDirtyTs = 0;
     this.pending = 0;
     this.todayKey = localDate();
@@ -143,7 +145,11 @@ class TypingStats {
     const gs = this.getKeyState;
     for (let i = 0; i < this.pollCodes.length; i++) {
       const down = gs(this.pollCodes[i]) ? 1 : 0;
-      if (down && !this.prev[i]) this.count(this.pollNames[i]);
+      if (down && !this.prev[i]) {
+        const name = this.pollNames[i];
+        if (this.onKeystroke) this.onKeystroke(name); // 音效等订阅方
+        if (this.counting) this.count(name);          // 统计关时只发事件不计数
+      }
       this.prev[i] = down;
     }
     // 防抖落盘：距最后一次变更满 30s

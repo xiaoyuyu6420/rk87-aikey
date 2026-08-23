@@ -35,6 +35,7 @@ let fg = null;              // 前台应用检测（配置档自动切档事件�
 let manualAtProc = null;    // 手动切档时的前台进程名（null=无 override，自动规则可接管）
 let macroRec = null;        // 宏录制器（仅录制期间存在 5ms 轮询）
 let macroArmed = false;     // 录制期间：抑制绑定动作/开麦联动，绑定键强制透传（键状态可见才能录到）
+let soundWin = null;        // 打字音效隐藏页（0x0 常驻；关闭音效时不创建，零开销）
 
 // 常驻托盘应用：瞬时异常（如 stdout 管道断开的 EPIPE）不崩溃退出
 process.on('uncaughtException', e => {
@@ -189,12 +190,25 @@ function boot() {
   });
 
   // 打字统计：先载入历史（禁用时也能看），启用才开轮询
+  //（统计关但音效开：轮询照跑、计数跳过——keystroke 事件仍要发）
   stats = new TypingStats().load();
   stats.fatigue = {
     enabled: cfg.settings.fatigueEnabled !== false,
     minutes: Math.max(5, Number(cfg.settings.fatigueMinutes) || 25),
   };
-  if (cfg.settings.statsEnabled !== false) stats.start();
+  stats.counting = cfg.settings.statsEnabled !== false;
+  if (cfg.settings.statsEnabled !== false || cfg.settings.soundEnabled) stats.start();
+
+  // 打字音效：击键边沿 → 隐藏页播放（窗口仅在启用时创建）
+  if (cfg.settings.soundEnabled) createSoundWindow();
+  stats.onKeystroke = () => {
+    if (cfg.settings.soundEnabled && soundWin && !soundWin.isDestroyed()) {
+      soundWin.webContents.send('keystroke');
+    } else if (!stats.onKeystroke._warned) {
+      stats.onKeystroke._warned = true;
+      console.log('[sound] 击键事件丢弃：enabled=', cfg.settings.soundEnabled, '窗口=', !!soundWin);
+    }
+  };
 
   // 键位动作里的系统操作（profile-cycle：按键循环切档）
   actions.setSysHandler(op => {
@@ -453,6 +467,74 @@ function setAutostart(on) {
   app.setLoginItemSettings({ openAtLogin: !!on, name: 'RK87-AIKey' });
 }
 
+// ---------- 打字音效隐藏页 ----------
+// 0x0 常驻窗口（skipTaskbar + backgroundThrottling:false——隐藏页定时器/IPC 不被
+// Chromium 节流；主窗口已有同款设置与实测结论）。音色 wav 由主进程读文件经 IPC 下发，
+// 页面不直接碰文件系统（绕开 file:// 跨源/asar 路径问题）。
+function createSoundWindow() {
+  if (soundWin && !soundWin.isDestroyed()) return;
+  soundWin = new BrowserWindow({
+    show: false, width: 1, height: 1, x: 0, y: 0, skipTaskbar: true, focusable: false,
+    webPreferences: {
+      preload: path.join(__dirname, '..', 'preload-sound.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      backgroundThrottling: false,
+    },
+  });
+  soundWin.loadFile(path.join(__dirname, '..', 'renderer', 'sound.html'));
+  soundWin.webContents.on('did-finish-load', () => { sendSoundConfig(); sendSoundBuffers(); });
+  soundWin.on('closed', () => { soundWin = null; });
+}
+
+// 当前音色的 wav 文件列表（内置 assets/sounds 按 pack 前缀过滤；custom=目录内全部）
+function listSoundFiles() {
+  try {
+    const s = cfg.settings;
+    const pack = s.soundPack || 'blue';
+    const dir = pack === 'custom' && s.soundCustomDir
+      ? s.soundCustomDir
+      : path.join(__dirname, '..', '..', 'assets', 'sounds');
+    const all = fs.readdirSync(dir).filter(f => /\.wav$/i.test(f)).sort();
+    const files = pack === 'custom' ? all : all.filter(f => path.basename(f).startsWith(pack + '-'));
+    return files.slice(0, 16).map(f => path.join(dir, f));
+  } catch (_) {
+    return []; // 目录不存在/不可读：静默空列表（页面提示「音色加载 0」）
+  }
+}
+
+function sendSoundBuffers() {
+  if (!soundWin || soundWin.isDestroyed()) return;
+  const list = listSoundFiles().map(p => ({
+    name: path.basename(p),
+    data: new Uint8Array(fs.readFileSync(p)),
+  }));
+  soundWin.webContents.send('sound-buffers', list);
+}
+
+function sendSoundConfig() {
+  if (!soundWin || soundWin.isDestroyed()) return;
+  const s = cfg.settings;
+  soundWin.webContents.send('sound-config', {
+    enabled: s.soundEnabled === true,
+    volume: Math.max(0, Math.min(1, Number(s.soundVolume) || 0)),
+  });
+}
+
+ipcMain.on('sound-log', (_e, msg) => console.log('[sound]', msg));
+
+ipcMain.handle('sound-test', () => {
+  if (!soundWin || soundWin.isDestroyed()) return { ok: false };
+  soundWin.webContents.send('keystroke');
+  return { ok: true };
+});
+
+ipcMain.handle('pick-dir', async () => {
+  const { dialog } = require('electron');
+  const r = await dialog.showOpenDialog(win, { properties: ['openDirectory'] });
+  return r.canceled ? null : r.filePaths[0];
+});
+
 function createTray() {
   let img = null;
   if (process.platform === 'darwin') {
@@ -577,7 +659,21 @@ ipcMain.handle('set-settings', (_e, settings) => {
   config.save(cfg);
   if ('autostart' in settings) setAutostart(settings.autostart);
   if ('statsEnabled' in settings && stats) {
-    settings.statsEnabled ? stats.start() : stats.stop();
+    stats.counting = settings.statsEnabled !== false;
+    // 统计关但音效开：轮询保持（keystroke 事件源不能断）；两者都关才停
+    if (stats.counting || cfg.settings.soundEnabled) stats.start();
+    else stats.stop();
+  }
+  if ('soundEnabled' in settings) {
+    if (settings.soundEnabled) { createSoundWindow(); sendSoundConfig(); }
+    else if (soundWin && !soundWin.isDestroyed()) soundWin.destroy();
+    // 音效开关影响统计轮询是否需要保持
+    if (stats && !stats.counting && settings.soundEnabled) stats.start();
+  }
+  if ('soundVolume' in settings) sendSoundConfig();
+  if ('soundPack' in settings || 'soundCustomDir' in settings) {
+    sendSoundConfig();
+    sendSoundBuffers();
   }
   if (stats) {
     if ('fatigueEnabled' in settings) stats.fatigue.enabled = settings.fatigueEnabled !== false;
@@ -688,5 +784,6 @@ app.on('before-quit', () => {
   if (session) session.stop(); // 推流中途退出会先补发 cmd=4 停麦再关句柄
   if (stats) stats.stop(); // 统计落盘
   if (fg) fg.stop();
+  if (soundWin && !soundWin.isDestroyed()) soundWin.destroy(); // 音效隐藏页
   abortReplay(); // 掐掉宏回放孤儿 timer
 });

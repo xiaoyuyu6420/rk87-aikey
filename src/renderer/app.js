@@ -40,6 +40,7 @@ async function init() {
   initPageNav();
 
   initMicBridge();
+  initSound();
   initStats();
 
   // 宏 30s 超时自动停 → 回填正在录制的行
@@ -783,6 +784,55 @@ async function initMicBridge() {
   }
 
   await refreshSinks();
+}
+
+// ---------- 打字音效 ----------
+function initSound() {
+  const opt = document.getElementById('opt-sound');
+  const packSel = document.getElementById('sound-pack');
+  const vol = document.getElementById('sound-volume');
+  const dirBtn = document.getElementById('sound-dir-btn');
+  const dirName = document.getElementById('sound-dir-name');
+
+  const syncCustom = () => {
+    const custom = packSel.value === 'custom';
+    dirBtn.hidden = !custom;
+    dirName.hidden = !custom || !state.settings.soundCustomDir;
+    dirName.textContent = state.settings.soundCustomDir || '';
+  };
+
+  opt.checked = !!state.settings.soundEnabled;
+  packSel.value = state.settings.soundPack || 'blue';
+  vol.value = Math.round((state.settings.soundVolume ?? 0.5) * 100);
+  syncCustom();
+
+  opt.onchange = async () => {
+    state.settings.soundEnabled = opt.checked;
+    await window.aikey.setSettings({ soundEnabled: opt.checked });
+    if (opt.checked) toast('音效已开启，打几个字试试');
+  };
+  packSel.onchange = async () => {
+    state.settings.soundPack = packSel.value;
+    await window.aikey.setSettings({ soundPack: packSel.value });
+    syncCustom();
+  };
+  dirBtn.onclick = async () => {
+    const d = await window.aikey.pickDir();
+    if (!d) return;
+    state.settings.soundCustomDir = d;
+    await window.aikey.setSettings({ soundCustomDir: d });
+    syncCustom();
+    toast('已设为自定义音色目录');
+  };
+  vol.onchange = async () => {
+    state.settings.soundVolume = Number(vol.value) / 100;
+    await window.aikey.setSettings({ soundVolume: Number(vol.value) / 100 });
+  };
+  document.getElementById('sound-test').onclick = async () => {
+    if (!opt.checked) { toast('先勾「启用」', true); return; }
+    const r = await window.aikey.soundTest();
+    if (r && r.ok === false) toast('音效页未就绪', true);
+  };
 }
 
 // ---------- 打字统计 ----------
