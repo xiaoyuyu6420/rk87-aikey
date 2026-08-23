@@ -7,7 +7,8 @@ const TYPES = [
   { value: 'hotkey',  label: '发送快捷键' },
 ];
 
-let state = null; // { keys, bindings, settings, deviceConnected }
+let state = null; // { keys, bindings, bindingsAi, settings, deviceConnected }
+let currentMode = 'fn'; // 'fn' 普通模式 | 'ai' AI 模式（两套绑定独立配置）
 
 init();
 
@@ -31,6 +32,7 @@ async function init() {
   optAuto.onchange = () => window.aikey.setSettings({ autostart: optAuto.checked });
 
   renderList();
+  initModeTabs();
 
   initMicBridge();
   initStats();
@@ -44,11 +46,34 @@ async function init() {
   });
 }
 
+// ---------- 模式 tab + 键盘当前模式徽章 ----------
+function initModeTabs() {
+  const badge = document.getElementById('kb-mode-badge');
+  const setBadge = on => {
+    badge.textContent = on ? '键盘：AI 模式' : '键盘：普通模式';
+    badge.classList.toggle('ai', !!on);
+  };
+  window.aikey.onAiMode(setBadge);
+  setBadge(!!state.aiMode);
+
+  const tabs = document.querySelectorAll('.mode-tab');
+  tabs.forEach(tab => {
+    tab.onclick = () => {
+      if (currentMode === tab.dataset.mode) return;
+      currentMode = tab.dataset.mode;
+      tabs.forEach(t => t.classList.toggle('active', t === tab));
+      renderList();
+    };
+  });
+}
+
+const bindingsOf = () => (currentMode === 'ai' ? state.bindingsAi : state.bindings) || {};
+
 function renderList() {
   const list = document.getElementById('key-list');
   list.innerHTML = '';
   for (const key of state.keys) {
-    const binding = state.bindings[key.id] || { type: 'none' };
+    const binding = bindingsOf()[key.id] || { type: 'none' };
     list.appendChild(buildRow(key, binding));
   }
 }
@@ -187,9 +212,9 @@ function buildRow(key, binding) {
 async function runRow(row, { save = false } = {}) {
   const action = row.collect();
   if (save) {
-    await window.aikey.setBinding(row.dataset.id, action);
-    state.bindings[row.dataset.id] = action;
-    toast(`已保存「${row.dataset.id}」`);
+    await window.aikey.setBinding(row.dataset.id, action, currentMode);
+    bindingsOf()[row.dataset.id] = action;
+    toast(`已保存「${row.dataset.id}」（${currentMode === 'ai' ? 'AI 模式' : '普通模式'}）`);
     return; // 保存只保存，不执行；想看效果点「测试」
   }
   const r = await window.aikey.testAction(action);

@@ -6,8 +6,10 @@ const { app } = require('electron');
 const { KEY_DEFS } = require('./keymap');
 
 const DEFAULTS = {
-  // bindings: keyId -> action（形状见 actions.js 注释）
+  // bindings: keyId -> action（普通模式，形状见 actions.js 注释）
+  // bindingsAi: keyId -> action（AI 模式，独立于普通模式配置）
   bindings: {},
+  bindingsAi: {},
   settings: {
     triggerOnUp: false,       // 预留：在抬起时触发（默认按下即触发）
     micBridgeEnabled: false,  // 键盘麦克风 → 虚拟声卡桥接
@@ -29,6 +31,7 @@ function load() {
     const cfg = JSON.parse(raw);
     return {
       bindings: { ...cfg.bindings },
+      bindingsAi: { ...(cfg.bindingsAi || cfg.bindings || {}) },
       labels: { ...(cfg.labels || {}) },
       settings: { ...DEFAULTS.settings, ...(cfg.settings || {}) },
     };
