@@ -10,6 +10,7 @@
 
 const { EventEmitter } = require('events');
 const { lookupKey } = require('./keymap');
+const kbdInject = require('./kbd-inject');
 
 const VID = 0x248a;
 const CMD_PID = 0x8243;
@@ -21,9 +22,10 @@ function loadBinding() {
     return require('../../vendor/mi-hid/prebuilds/HID-win32-x64/node-napi-v4.node');
   }
   if (process.platform === 'darwin') {
-    return process.arch === 'arm64'
-      ? require('../../vendor/mi-hid/prebuilds/HID-darwin-arm64/node-napi-v4.node')
-      : require('../../vendor/mi-hid/prebuilds/HID-darwin-x64/node-napi-v4.node');
+    // mac 不用 vendor prebuild：其 darwin 版打开命令口会独占(seize)整个键盘设备，
+    // 系统键盘服务被抢走导致打字失灵（退出 app 才恢复）。npm node-hid 是标准
+    // hidapi（非独占 open），devices()/HID/read/write 接口同构，实测可用。
+    return require('node-hid');
   }
   throw new Error('当前平台暂不支持键盘命令会话: ' + process.platform);
 }
@@ -150,6 +152,16 @@ class KeySession extends EventEmitter {
 
   _onData(data) {
     if (!data || data.length < 8) return; // 坏帧/短帧防护
+    // macOS 蓝牙/2.4G：标准键盘报文（reportId=2，9字节）也被路由到本口，
+    // 交回注模块转发回系统，否则打字失灵；reportId=6（多媒体/consumer）暂不回注
+    if (process.platform === 'darwin' && data[0] === 2 && data.length >= 9) {
+      kbdInject.feedKeyboardReport(data);
+      return;
+    }
+    if (process.platform === 'darwin' && data[0] === 6 && data.length >= 15) {
+      // consumer（多媒体键）报文：不得进命令状态机（usage 字节会被误当 cmd）
+      return;
+    }
     // 音频流直通（renderer 桥接消费）
     if (data[0] === 0x1b) {
       this.emit('audio', data);
@@ -196,6 +208,7 @@ class KeySession extends EventEmitter {
     }
     // AI 模式切换键上报
     if (cmd === 209 && len === 1) {
+      this.pressed.clear(); // 切换瞬间边沿状态作废：按住中的键不会再有对应抬起码
       this.emit('ai-mode', { on: payload[0] === 1 });
       return;
     }
@@ -231,6 +244,7 @@ class KeySession extends EventEmitter {
     this.got104 = false;
     this.micOn = false;
     this.pressed.clear(); // 断线清按键状态，避免重连后边沿错乱
+    kbdInject.reset();    // 回注侧同样清边沿（残留按下的键全部抬起）
     this.pendingHb = false;
     this.hbMiss = 0;
     if (this.hbTimer) { clearInterval(this.hbTimer); this.hbTimer = null; }
@@ -278,6 +292,7 @@ class KeySession extends EventEmitter {
     if (this.hbTimer) { clearInterval(this.hbTimer); this.hbTimer = null; }
     if (this.watchTimer) { clearTimeout(this.watchTimer); this.watchTimer = null; }
     if (this.hsTimer) { clearTimeout(this.hsTimer); this.hsTimer = null; }
+    kbdInject.reset();
     try { if (this.dev) this.dev.close(); } catch (_) {}
     this.dev = null;
   }

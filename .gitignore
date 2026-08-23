@@ -4,3 +4,4 @@ dist*/
 _reversed/
 _reversed/.mimosa/
 *.log
+e2e/tmp-userdata/

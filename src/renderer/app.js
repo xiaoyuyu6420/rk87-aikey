@@ -15,12 +15,16 @@ async function init() {
   state = await window.aikey.getState();
 
   const elStatus = document.getElementById('device-status');
-  const setDev = c => {
+  // 键盘状态 = 有线连接 || 蓝牙/2.4G 命令会话在线（任一即视为已连接）
+  let devConnected = !!state.deviceConnected, sessOnline = !!state.sessionOnline;
+  const setDev = () => {
+    const c = devConnected || sessOnline;
     elStatus.textContent = c ? '键盘已连接' : '键盘未连接';
     elStatus.classList.toggle('on', !!c);
   };
-  setDev(state.deviceConnected);
-  window.aikey.onDeviceStatus(setDev);
+  window.aikey.onDeviceStatus(c => { devConnected = c; setDev(); });
+  window.aikey.onSessionStatus(on => { sessOnline = on; setDev(); });
+  setDev();
 
   const optAuto = document.getElementById('opt-autostart');
   optAuto.checked = !!state.settings.autostart;
@@ -93,7 +97,7 @@ function buildRow(key, binding) {
     if (t === 'none') {
       const span = document.createElement('span');
       span.className = 'none-hint';
-      span.textContent = '此键位不触发任何动作';
+      span.textContent = '此键位不触发任何动作，原按键功能完全保留';
       fields.appendChild(span);
       return;
     }
@@ -133,6 +137,15 @@ function buildRow(key, binding) {
       attachCapture(cap, combo);
       fields.appendChild(cap);
     }
+    // 透传开关：仅对有「原按键功能」的键（F1-F12/PrtSc）显示；AI 键/扩展键位无原功能
+    if (/^(f\d{1,2}|prtsc)$/.test(key.id)) {
+      const pass = document.createElement('label');
+      pass.className = 'pass-line';
+      pass.innerHTML = '<input type="checkbox"/> 同时保留原按键功能（透传：如 F10 输入法语音、亮度/音量键照常生效）';
+      pass.querySelector('input').checked = binding.passthrough === true;
+      pass.title = '不勾 = 绑定动作后独占此键，原功能屏蔽；勾选 = 动作和原功能同时触发';
+      fields.appendChild(pass);
+    }
   };
   renderFields();
   typeSel.onchange = renderFields;
@@ -161,6 +174,8 @@ function buildRow(key, binding) {
       if (nums[0]) action.afterDelay = Number(nums[0].value) || 0;
       if (texts[0] && texts[0].value.trim()) action.afterHotkey = texts[0].value.trim();
     }
+    const passCb = fields.querySelector('label.pass-line input');
+    if (passCb && passCb.checked) action.passthrough = true; // 不勾/不可透传键 = 屏蔽（默认）
     return action;
   }
 

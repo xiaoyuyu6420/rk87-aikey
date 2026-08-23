@@ -10,6 +10,7 @@ const { lookupKey, allKeys } = require('./keymap');
 const { MicPipeline } = require('./mic');
 const { TypingStats } = require('./stats');
 const actions = require('./actions');
+const kbdInject = require('./kbd-inject');
 const config = require('./config');
 
 let tray = null;
@@ -43,8 +44,10 @@ function boot() {
 
   watcher = new KeyboardWatcher();
   watcher.on('key', onKey);
+  watcher.on('ai-mode', ({ on }) => onAiMode(on));
   watcher.on('device', ({ connected }) => {
     deviceConnected = connected;
+    if (!connected) releasePassthrough(); // 有线拔出时透传按下的键兜底抬起
     if (win) win.webContents.send('device-status', connected);
   });
   watcher.start();
@@ -54,9 +57,11 @@ function boot() {
   // 键盘命令会话：蓝牙口心跳+验证，驱动固件开麦（完全自主，无需官方 RK-AI）
   session = new KeySession();
   session.on('key', onKey); // 蓝牙连接时按键上报走会话口
+  session.on('ai-mode', ({ on }) => onAiMode(on));
   session.on('state', ({ connected, reason }) => {
     sessionOnline = connected;
     console.log(`[session] ${connected ? '在线' : '离线' + (reason ? '（' + reason + '）' : '')}`);
+    if (!connected) releasePassthrough(); // 会话断开时透传按下的键兜底抬起
     if (win) win.webContents.send('session-status', connected);
   });
   session.on('mic', ({ on }) => {
@@ -81,6 +86,17 @@ function boot() {
   });
   session.start();
 
+  // 非 AI 模式（mac）：F1-F12/PrtSc 走标准报文进回注模块；绑定了动作的键在此拦截。
+  // 返回 'block'=屏蔽原键、'passthrough'=动作+原键都触发、null=未绑定走原生回注
+  kbdInject.setFnKeyPolicy(keyId => {
+    const binding = (cfg.bindings && cfg.bindings[keyId]) || { type: 'none' };
+    if (binding.type === 'none') return null;
+    console.log(`[key] ${keyId} down（标准报文，已拦截）`);
+    const r = actions.run(binding);
+    if (r && r.ok === false) console.log(`[action] ${keyId} 失败:`, r.error);
+    return binding.passthrough === true ? 'passthrough' : 'block';
+  });
+
   // 打字统计：先载入历史（禁用时也能看），启用才开轮询
   stats = new TypingStats().load();
   stats.fatigue = {
@@ -89,14 +105,39 @@ function boot() {
   };
   if (cfg.settings.statsEnabled !== false) stats.start();
 
+  // 精简 macOS 菜单栏：默认 7 项菜单太宽，刘海屏上会把右侧菜单栏图标挤掉；
+  // 只留 app 名 + Edit（输入框的复制/粘贴/全选快捷键依赖 editMenu）
+  if (process.platform === 'darwin') {
+    Menu.setApplicationMenu(Menu.buildFromTemplate([
+      { role: 'appMenu' },
+      { role: 'editMenu' },
+    ]));
+  }
+
   createTray();
   if (cfg.settings.autostart) setAutostart(true);
 
   showWindow(); // 启动即打开设置窗口（关闭窗口=隐藏到托盘）
 }
 
+let aiModeOn = false;
+// AI 模式切换：功能键从标准报文切到厂商码上报（或切回），影响透传/拦截路径的选择
+function onAiMode(on) {
+  if (aiModeOn === on) return;
+  aiModeOn = on;
+  console.log(`[ai-mode] ${on ? '进入 AI 模式（功能键改走厂商码上报）' : '退出 AI 模式（功能键恢复标准报文）'}`);
+  // 切换瞬间两条上报路径互换，按住中的键不会有对应的抬起报文：
+  // 两侧边沿状态全部清空 + 已回注的键抬起，避免系统键状态卡住
+  releasePassthrough();
+  kbdInject.reset();
+}
+
 // 多连接（如 USB+蓝牙/2.4G 并存）时同一按键会从两个口各报一次，全局去重
 let lastGlobalKey = null;
+// 透传回注的 down 决定（keyId -> down 时是否已回注）。up 按记录执行，
+// 防止按住期间修改配置导致 down/up 不配对、系统键状态卡住
+const ptDecision = new Map();
+
 function onKey({ code, keyId, phase }) {
   const now = Date.now();
   if (lastGlobalKey && lastGlobalKey.keyId === keyId && lastGlobalKey.phase === phase && now - lastGlobalKey.ts < 80) return;
@@ -112,13 +153,38 @@ function onKey({ code, keyId, phase }) {
     if (phase === 'down') session.askVoice();
     else session.stopVoice();
   }
-  // 默认按下触发
-  if (phase !== 'down') return;
-  const action = (cfg.bindings && cfg.bindings[keyId]) || { type: 'none' };
-  const result = actions.run(action);
-  if (result && result.ok === false) {
-    console.log(`[action] ${keyId} 失败:`, result.error);
+  const binding = (cfg.bindings && cfg.bindings[keyId]) || { type: 'none' };
+  // 动作只在按下触发
+  if (phase === 'down' && binding.type !== 'none') {
+    const result = actions.run(binding);
+    if (result && result.ok === false) {
+      console.log(`[action] ${keyId} 失败:`, result.error);
+    }
   }
+  // 透传：未绑定任何动作（完全原生）或勾了透传 → 回注标准按键
+  //（AI 模式下 F 键走厂商码不经系统，透传让输入法语音/亮度等原功能照常生效）
+  passthroughKey(keyId, phase, binding.passthrough === true || binding.type === 'none');
+}
+
+// 透传回注（AI 模式厂商码路径）。down 时记下决定，up 按记录执行；
+// 无键码的键（AI 键/扩展键位，无原功能可言）发送失败不记状态
+function passthroughKey(keyId, phase, pass) {
+  const flags = process.platform === 'darwin' ? kbdInject.currentModFlags() : 0;
+  if (phase === 'down') {
+    ptDecision.set(keyId, false);
+    if (pass && actions.postRawKey(keyId, true, flags)) ptDecision.set(keyId, true);
+  } else if (ptDecision.has(keyId)) {
+    if (ptDecision.get(keyId)) actions.postRawKey(keyId, false, flags);
+    ptDecision.delete(keyId);
+  }
+}
+
+// 断线/停止兜底：把透传已按下的键全部抬起，避免系统键状态卡住
+function releasePassthrough() {
+  for (const [keyId, injected] of ptDecision) {
+    if (injected) actions.postRawKey(keyId, false, 0);
+  }
+  ptDecision.clear();
 }
 
 function exitOfficialRKAI() {
@@ -138,7 +204,19 @@ function setAutostart(on) {
 }
 
 function createTray() {
-  let img = nativeImage.createFromPath(path.join(__dirname, '..', '..', 'assets', 'icon.png'));
+  let img = null;
+  if (process.platform === 'darwin') {
+    // macOS：专用 template 图（黑色内容+透明底），深浅色菜单栏自适应
+    img = nativeImage.createFromPath(path.join(__dirname, '..', '..', 'assets', 'trayTemplate.png'));
+    if (!img.isEmpty()) img.setTemplateImage(true);
+  }
+  if (!img || img.isEmpty()) {
+    img = nativeImage.createFromPath(path.join(__dirname, '..', '..', 'assets', 'icon.png'));
+    if (!img.isEmpty()) {
+      // Windows/兜底：原图 512x512 需缩到托盘尺寸
+      img = img.resize({ width: process.platform === 'darwin' ? 22 : 32, height: process.platform === 'darwin' ? 22 : 32 });
+    }
+  }
   if (img.isEmpty()) {
     // 兜底：1x1 蓝点 dataURL
     img = nativeImage.createFromDataURL('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQABh6FO1AAAAABJRU5ErkJggg==');
@@ -152,7 +230,7 @@ function rebuildTrayMenu() {
   const menu = Menu.buildFromTemplate([
     { label: '打开设置', click: () => showWindow() },
     { type: 'separator' },
-    { label: deviceConnected ? '键盘：已连接' : '键盘：未连接', enabled: false },
+    { label: (deviceConnected || sessionOnline) ? '键盘：已连接' : '键盘：未连接', enabled: false },
     { label: sessionOnline ? `麦克风会话：在线${session && session.transport ? '（' + session.transport + '）' : ''}` : '麦克风会话：离线', enabled: false },
     { label: '退出官方 RK-AI', click: () => { exitOfficialRKAI(); } },
     { label: '开机自启', type: 'checkbox', checked: !!(cfg.settings && cfg.settings.autostart), click: mi => {
