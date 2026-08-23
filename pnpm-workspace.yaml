@@ -1,5 +1,8 @@
+overrides:
+  '@electron/get': ^3.1.0
 allowBuilds:
   electron: true
   koffi: true
   node-hid: true
   esbuild: true
+  electron-winstaller: false
