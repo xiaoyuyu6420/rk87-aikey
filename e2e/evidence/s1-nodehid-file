@@ -1,0 +1,13 @@
+node_modules/node-hid/prebuilds/HID_hidraw-linux-x64-musl/node-napi-v4.node: ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked, stripped
+node_modules/node-hid/prebuilds/HID-linux-x64-musl/node-napi-v4.node: ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked, stripped
+node_modules/node-hid/prebuilds/HID_hidraw-linux-x64/node-napi-v4.node: ELF 64-bit LSB shared object, x86-64, version 1 (GNU/Linux), dynamically linked, BuildID[sha1]=b6d174e8b9b8c1ae86ad77b1b8d49bc5c9516dd8, stripped
+node_modules/node-hid/prebuilds/HID-linux-x64/node-napi-v4.node: ELF 64-bit LSB shared object, x86-64, version 1 (GNU/Linux), dynamically linked, BuildID[sha1]=83a79853e3c5e05a7fc8d494512c224d076fb57a, stripped
+node_modules/node-hid/prebuilds/HID_hidraw-linux-arm/node-napi-v4.node: ELF 32-bit LSB shared object, ARM, EABI5 version 1 (GNU/Linux), dynamically linked, BuildID[sha1]=c3a6ce86b319b9c49d39cdce9b38aae5e56c5838, stripped
+node_modules/node-hid/prebuilds/HID_hidraw-linux-arm64/node-napi-v4.node: ELF 64-bit LSB shared object, ARM aarch64, version 1 (GNU/Linux), dynamically linked, BuildID[sha1]=17f9286e315b390fd22bf6e4f45d7056781b6d05, stripped
+node_modules/node-hid/prebuilds/HID-win32-x64/node-napi-v4.node: PE32+ executable (DLL) (GUI) x86-64, for MS Windows
+node_modules/node-hid/prebuilds/HID-darwin-arm64/node-napi-v4.node: Mach-O 64-bit bundle arm64
+node_modules/node-hid/prebuilds/HID-linux-arm64/node-napi-v4.node: ELF 64-bit LSB shared object, ARM aarch64, version 1 (GNU/Linux), dynamically linked, BuildID[sha1]=abe0cc8d100b0feed8cce272439bfb07baa381f4, stripped
+node_modules/node-hid/prebuilds/HID-win32-ia32/node-napi-v4.node: PE32 executable (DLL) (GUI) Intel 80386, for MS Windows
+node_modules/node-hid/prebuilds/HID-darwin-x64/node-napi-v4.node: Mach-O 64-bit bundle x86_64
+node_modules/node-hid/prebuilds/HID-win32-arm64/node-napi-v4.node: PE32+ executable (DLL) (GUI) Aarch64, for MS Windows
+node_modules/node-hid/prebuilds/HID-linux-arm/node-napi-v4.node: ELF 32-bit LSB shared object, ARM, EABI5 version 1 (GNU/Linux), dynamically linked, BuildID[sha1]=ca1469603d1496db030d1db39808e0c080e03070, stripped

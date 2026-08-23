@@ -1,0 +1,2 @@
+-rw-r--r--@ 1 munich  staff  108386081 Aug 22 23:16 dist/RK87 AIKey-0.6.0-arm64-mac.zip
+-rw-r--r--@ 1 munich  staff  113206005 Aug 22 23:15 dist/RK87 AIKey-0.6.0-mac.zip

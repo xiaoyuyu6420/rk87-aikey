@@ -1,0 +1,39 @@
+R1	pass	electron 33 二进制就位
+R1	pass	koffi darwin 原生库存在(arm64)
+R1	app-bug	node-hid 缺 darwin-arm64 库
+R2	app-bug	CDP 15s 未就绪；stdout 尾部: s. [71121:0822/223025.862021:WARNING:viz_main_impl.cc(85)] VizNullHypothesis is disabled (not a warning) [session] 离线（no-cmd-interface） [session] 离线（no-cmd-interface） [session] 离线（no-cmd-interface） [session] 离线（no-cmd-interface） [session] 离线（no-cmd-interface） 
+R7	inconclusive	CDP 不可达
+R10	inconclusive	CDP 不可达
+R13	pass	dist:mac 退出码 0
+R13	app-bug	zip 产物不足（1 个）
+R13	app-bug	arm64 打包产物 15s 无 CDP 页面；stdout:  [72091:0822/223155.561375:ERROR:devtools_http_handler.cc(319)] Cannot start http server for devtools. [72105:0822/223155.675961:WARNING:viz_main_impl.cc(85)] VizNullHypothesis is disabled (not a warning) [session] 离线（no-cmd-interface） [session] 离线（no-cmd-interface） [session] 离线（no-cmd-interface） [session] 离线（no-cmd-interface） [session] 离线（no-cmd-interface） 
+R14	env-missing	未检测到 BlackHole 虚拟声卡；安装: brew install blackhole-2ch（测试不代装）
+R14	inconclusive	CDP 不可达（s6 需要 app 在跑）
+R8	app-bug	重启失败：CDP 不可达
+R2	app-bug	CDP 不可达
+R1	pass	electron 33 二进制就位
+R1	pass	koffi darwin 原生库存在(arm64)
+R1	pass	node-hid 原生库存在(arm64)
+R2	pass	CDP 页面在 15s 内就绪
+R2	pass	启动截图 /Users/munich/Desktop/rk87-AIKey/e2e/evidence/s2-boot.png
+R5	app-bug	会话离线: [session] 离线（no-cmd-interface） [session] 离线（no-cmd-interface） 
+R4	pass	无未捕获异常（日志 10 行）
+R7	app-bug	getState 键数异常: {"keys":18,"bindingCount":0,"settings":"object","deviceConnected":false,"sessionOnline":false,"firstKey":{"id":"ai_key","label":"AI 键（官方: AI问答）","code":51}}
+R7	pass	DOM 键行 18
+R7	pass	renderer console 无 error
+R10	inconclusive	窗口未聚焦（hasFocus=��，无法归因
+R11	app-bug	注入成功但计数未增（0 -> ��
+R13	pass	dist:mac 退出码 0
+R13	pass	产物 zip x2
+R13	pass	arm64 打包产物 CDP 冒烟通过
+R13	app-bug	打包产物 getState 异常: 18
+R14	env-missing	未检测到 BlackHole 虚拟声卡；安装: brew install blackhole-2ch（测试不代装）
+R14	inconclusive	无 PCM 且会话离线（依赖 R5 归因）
+R8	pass	config.json 落盘于隔离 userData: 
+R8	pass	重启后绑定+备注持久化一致
+R2	app-bug	存活不足 120s（pid 86255 已退出）或 CDP 失联；stdout 尾部: 
+R2	pass	全程无 [uncaught]
+R3	pass	第二实例自行退出（单实例锁生效，非抢跑）
+R12	app-bug	关窗后进程退出（未按托盘常驻设计工作）
+R12	pass	退出后无残留进程
+R9	pass	真实 userData 零污染（前后快照一致）

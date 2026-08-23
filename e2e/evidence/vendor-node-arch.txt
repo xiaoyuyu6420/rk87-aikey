@@ -1,0 +1,14 @@
+vendor/mi-sbc/prebuilds/sbc-linux-arm64/node-napi-v4.node: ELF 64-bit LSB shared object, ARM aarch64, version 1 (SYSV), dynamically linked, BuildID[sha1]=bb370c3ed3b792562aa91d2f6669cbc2523fced9, not stripped
+vendor/mi-sbc/prebuilds/sbc-linux-x64/node-napi-v4.node: ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked, BuildID[sha1]=7c01683456bff8823088ae28ee53f043f174c200, not stripped
+vendor/mi-sbc/prebuilds/sbc-win32-x64/node-napi-v4.node: PE32+ executable (DLL) (GUI) x86-64, for MS Windows
+vendor/mi-sbc/prebuilds/sbc-darwin-x64/node-napi-v4.node: Mach-O 64-bit bundle x86_64
+vendor/mi-sbc/prebuilds/sbc-win32-ia32/node-napi-v4.node: PE32 executable (DLL) (GUI) Intel 80386, for MS Windows
+vendor/mi-sbc/prebuilds/sbc-darwin-arm64/node-napi-v4.node: Mach-O 64-bit bundle arm64
+vendor/mi-hid/prebuilds/HID-darwin-x64/node-napi-v4.node: Mach-O 64-bit bundle x86_64
+vendor/mi-hid/prebuilds/HID_hidraw-linux-x64/node-napi-v4.node: ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked, BuildID[sha1]=8ff9e934f51b416112c451b34c428c26c2219590, with debug_info, not stripped
+vendor/mi-hid/prebuilds/HID-linux-x64/node-napi-v4.node: ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked, BuildID[sha1]=f45bed5cfd456f3c4a60f1d35c2f218720d4a908, with debug_info, not stripped
+vendor/mi-hid/prebuilds/HID_hidraw-linux-arm64/node-napi-v4.node: ELF 64-bit LSB shared object, ARM aarch64, version 1 (SYSV), dynamically linked, BuildID[sha1]=961ae07763517aad31100a0b3356fb4cfd7dd46a, with debug_info, not stripped
+vendor/mi-hid/prebuilds/HID-win32-x64/node-napi-v4.node: PE32+ executable (DLL) (GUI) x86-64, for MS Windows
+vendor/mi-hid/prebuilds/HID-darwin-arm64/node-napi-v4.node: Mach-O 64-bit bundle arm64
+vendor/mi-hid/prebuilds/HID-linux-arm64/node-napi-v4.node: ELF 64-bit LSB shared object, ARM aarch64, version 1 (SYSV), dynamically linked, BuildID[sha1]=2aa14e3b5cea72e63b6847e5749154ab822df470, with debug_info, not stripped
+vendor/mi-hid/prebuilds/HID-win32-ia32/node-napi-v4.node: PE32 executable (DLL) (GUI) Intel 80386, for MS Windows

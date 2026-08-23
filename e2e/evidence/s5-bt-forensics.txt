@@ -1,0 +1,50 @@
+=== vendor mi-hid (darwin-arm64) ===
+total: 3
+VID 248a devices: []
+sample(前5): [
+ {
+  "v": 0,
+  "p": 0,
+  "up": 65280,
+  "u": 255,
+  "rel": 0,
+  "if": -1,
+  "path": "DevSrvsID:4294969959"
+ },
+ {
+  "v": 0,
+  "p": 0,
+  "up": 65280,
+  "u": 72,
+  "rel": 0,
+  "if": -1,
+  "path": "DevSrvsID:4294969484"
+ },
+ {
+  "v": 0,
+  "p": 0,
+  "up": 12,
+  "u": 1,
+  "rel": 0,
+  "if": -1,
+  "path": "DevSrvsID:4294969985"
+ }
+]
+=== npm node-hid ===
+total: 3
+VID 248a devices: []
+              Minor Type: Mouse
+          R87Pro Ai:
+              Address: A4:C1:38:C8:65:56
+              Vendor ID: 0x248A
+              Product ID: 0x8243
+              Minor Type: Keyboard
+          R87Pro Ai:
+              Address: A4:C1:38:F0:1D:DB
+              Minor Type: Keyboard
+          VXE R1SE+:
+              Address: D0:16:DC:10:32:EA
+              Minor Type: Mouse
+          VXE R1SE+:
+--- ioreg ---
+3
