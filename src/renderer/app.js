@@ -33,6 +33,7 @@ async function init() {
 
   renderList();
   initModeTabs();
+  initPageNav();
 
   initMicBridge();
   initStats();
@@ -43,6 +44,20 @@ async function init() {
     row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     row.classList.add('flash');
     setTimeout(() => row.classList.remove('flash'), 600);
+  });
+}
+
+// ---------- 顶层页面切换（按键映射 / 打字统计） ----------
+function initPageNav() {
+  const tabs = document.querySelectorAll('.page-tab');
+  tabs.forEach(tab => {
+    tab.onclick = () => {
+      if (tab.classList.contains('active')) return;
+      tabs.forEach(t => t.classList.toggle('active', t === tab));
+      document.getElementById('page-keys').hidden = tab.dataset.page !== 'keys';
+      document.getElementById('page-stats').hidden = tab.dataset.page !== 'stats';
+      if (tab.dataset.page === 'stats') refreshStats(); // 切进来立即刷新一次
+    };
   });
 }
 
@@ -517,7 +532,10 @@ function initStats() {
     window.aikey.setSettings({ fatigueMinutes: v });
   };
   if (statsTimer) clearInterval(statsTimer);
-  statsTimer = setInterval(() => { if (!document.hidden) refreshStats(); }, 2000);
+  // 统计页可见时才轮询（切到统计页时会立即手动刷一次）
+  statsTimer = setInterval(() => {
+    if (!document.hidden && !document.getElementById('page-stats')?.hidden) refreshStats();
+  }, 2000);
   refreshStats();
 }
 
