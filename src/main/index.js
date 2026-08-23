@@ -1,7 +1,8 @@
 // RK87 AIKey 主进程：托盘 + 设置窗口 + HID 监听 + 动作分发
 
-const { app, Tray, Menu, BrowserWindow, ipcMain, nativeImage } = require('electron');
+const { app, Tray, Menu, BrowserWindow, ipcMain, nativeImage, shell } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const { execFile } = require('child_process');
 
 const { KeyboardWatcher } = require('./hid');
@@ -31,6 +32,29 @@ process.on('uncaughtException', e => {
   try { console.log('[uncaught]', e && e.message); } catch (_) {}
 });
 
+// ---------- 文件日志 ----------
+// 打包版（安装版）的 console 输出默认丢弃，出问题无从诊断——把所有
+// console.log 落盘到 userData/logs/app.log（超 2MB 轮转为 app.old.log），
+// 托盘菜单可一键打开日志文件夹。纯只读观测，不影响任何行为。
+function initFileLog() {
+  try {
+    const dir = path.join(app.getPath('userData'), 'logs');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'app.log');
+    try {
+      if (fs.statSync(file).size > 2 * 1024 * 1024) fs.renameSync(file, path.join(dir, 'app.old.log'));
+    } catch (_) {}
+    const stream = fs.createWriteStream(file, { flags: 'a' });
+    const orig = console.log;
+    console.log = (...args) => {
+      orig(...args);
+      try {
+        stream.write(new Date().toISOString() + ' ' + args.map(a => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ') + '\n');
+      } catch (_) {}
+    };
+  } catch (_) {}
+}
+
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
@@ -41,6 +65,7 @@ if (!gotLock) {
 }
 
 function boot() {
+  initFileLog(); // 先于一切业务日志初始化
   // mac 菜单栏应用：Dock 不占位（点 x 关窗后只剩顶部状态栏图标；窗口随时可从托盘唤回）
   if (process.platform === 'darwin') app.dock.hide();
   cfg = config.load();
@@ -272,6 +297,7 @@ function rebuildTrayMenu() {
     { label: (deviceConnected || sessionOnline) ? '键盘：已连接' : '键盘：未连接', enabled: false },
     { label: sessionOnline ? `麦克风会话：在线${session && session.transport ? '（' + session.transport + '）' : ''}` : '麦克风会话：离线', enabled: false },
     { label: '重连键盘', click: () => { if (session) session.reconnect(); } },
+    { label: '打开日志文件夹', click: () => shell.openPath(path.join(app.getPath('userData'), 'logs')) },
     { label: '退出官方 RK-AI', click: () => { exitOfficialRKAI(); } },
     { label: '开机自启', type: 'checkbox', checked: !!(cfg.settings && cfg.settings.autostart), click: mi => {
       cfg.settings.autostart = mi.checked;

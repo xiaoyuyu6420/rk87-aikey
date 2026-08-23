@@ -149,7 +149,15 @@ function postKey(vk, down, flags) {
     CG.setFlags(ev, flags);
     CG.post(0, ev); // kCGHIDEventTap
     CG.release(ev);
-  } catch (_) {}
+    state.postOk = (state.postOk || 0) + 1;
+  } catch (e) {
+    state.postFail = (state.postFail || 0) + 1;
+    // CGEventPost 对未授权是静默无效（不抛异常），这里只捕真异常留痕；
+    // 「帧在收、注入在发、系统没反应」= 授权失效，对照流量统计即可判定
+    if (state.postFail === 1 || state.postFail % 50 === 0) {
+      console.log(`[inject] CGEvent 发送异常累计 ${state.postFail} 次: ${e.message}`);
+    }
+  }
 }
 
 function currentFlags(mod) {
@@ -253,4 +261,9 @@ function reset() {
   fnKeyInjected.clear();
 }
 
-module.exports = { feedKeyboardReport, reset, setFnKeyPolicy, currentModFlags };
+// 诊断：注入成功/失败计数（配合会话流量统计，判定「报文在收但系统没反应」的授权失效）
+function getDiag() {
+  return { postOk: state.postOk || 0, postFail: state.postFail || 0 };
+}
+
+module.exports = { feedKeyboardReport, reset, setFnKeyPolicy, currentModFlags, getDiag };
