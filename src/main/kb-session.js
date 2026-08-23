@@ -79,6 +79,8 @@ class KeySession extends EventEmitter {
     this._pendingAskTs = 0;  // 主机 askVoice 发出时刻
     this._ghostWatch = null; // 会话建立后幽灵推流补停的检查 timer
     this.lastKey = null;
+    this.battery = null;     // { level: 0-100, charging: bool, ts }（156 查询回复 / 208 主动上报）
+    this._elecQs = 0;        // 上次电量查询时刻（5 分钟节奏）
     this.channel = 0xf1;      // 写帧通道前缀
     this.transport = '';      // '2.4G-dongle' | '蓝牙'
     this.devPath = null;
@@ -138,6 +140,11 @@ class KeySession extends EventEmitter {
         }
         this._voiceStopGuard();
         this._rxStats();
+        // 电量刷新：5 分钟一次 cmd=12（156 回复带电量，官方同款节奏；62B 写开销可忽略）
+        if (this.connected && Date.now() - this._elecQs > 300000) {
+          this._elecQs = Date.now();
+          this._write(12, [], 'battery-query');
+        }
       }, 1000);
       // 握手超时：键盘不在此口上（如 dongle 插着但键盘走蓝牙）→ 换口
       if (this.hsTimer) clearTimeout(this.hsTimer);
@@ -278,6 +285,27 @@ class KeySession extends EventEmitter {
       this.micOn = false;
       this._stopGuardTs = 0; // 固件确认停麦，撤销停止看护
       this.emit('mic', { on: false, source: 'device' });
+      return;
+    }
+    // 设备状态回复（cmd=156，握手/查询 cmd=12 的回应，len≥11）：
+    // [0..1]版本(BCD) [2..3]DPI [4]电量 [5..10]MAC。官方对有线/dongle（hidConnectMode 2）
+    // 恒置 100（该读数不可信），仅蓝牙口为真实电量——照抄
+    if (cmd === 156 && len >= 11) {
+      const level = this.transport === '蓝牙' ? payload[4] : 100;
+      if (!this.battery || this.battery.level !== level) {
+        this.battery = { level, charging: this.battery ? this.battery.charging : false, ts: Date.now() };
+        this.emit('battery', { ...this.battery });
+      }
+      return;
+    }
+    // 电量/充电状态上报（cmd=208）：payload[0] 充电标志（官方语义 0==充电中）、
+    // payload[1] 电量百分比。连接时与状态变化时键盘主动上报，纯被动零轮询
+    if (cmd === 208 && len >= 2) {
+      const b = { level: payload[1], charging: payload[0] === 0, ts: Date.now() };
+      if (!this.battery || this.battery.level !== b.level || this.battery.charging !== b.charging) {
+        this.battery = b;
+        this.emit('battery', { ...b });
+      }
       return;
     }
     // AI 模式切换键上报

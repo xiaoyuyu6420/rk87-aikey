@@ -224,7 +224,16 @@ class TypingStats {
       const ds = localDate(new Date(now.getFullYear(), now.getMonth(), now.getDate() - i));
       week.push({ date: ds, total: (this.days[ds] || {}).total || 0 });
     }
-    return { supported: this.supported, today: { total: today.total || 0, topKeys, keys: today.keys || {} }, week };
+    // 轴体寿命：全历史累计（每键 + 总数）。days 只留 90 天，累计口径即「近 90 天」，
+    // 对寿命估算足够（50M 次轴体寿命的万分之一级进度）
+    const lifetime = { total: 0, keys: {} };
+    for (const d of Object.values(this.days)) {
+      lifetime.total += d.total || 0;
+      for (const [name, count] of Object.entries(d.keys || {})) {
+        lifetime.keys[name] = (lifetime.keys[name] || 0) + count;
+      }
+    }
+    return { supported: this.supported, today: { total: today.total || 0, topKeys, keys: today.keys || {} }, week, lifetime };
   }
 }
 

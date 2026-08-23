@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('aikey', {
   onMicState: cb => ipcRenderer.on('mic-state', (_e, on) => cb(on)),
   onSessionStatus: cb => ipcRenderer.on('session-status', (_e, on) => cb(on)),
   onAiMode: cb => ipcRenderer.on('ai-mode', (_e, on) => cb(on)),
+  onBattery: cb => ipcRenderer.on('battery', (_e, b) => cb(b)),
   micControl: on => ipcRenderer.invoke('mic-control', on),
   // 打字统计
   statsGet: () => ipcRenderer.invoke('stats-get'),

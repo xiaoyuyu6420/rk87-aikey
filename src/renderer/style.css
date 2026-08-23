@@ -180,6 +180,7 @@ button.capturing {
   background: linear-gradient(90deg, var(--accent), #7ee0a3);
 }
 .tk-row .tk-count { flex: 0 0 auto; min-width: 36px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.lifetime-total { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
 .stats-week { display: flex; align-items: stretch; gap: 8px; height: 76px; }
 .sw-col { flex: 1; display: flex; flex-direction: column; gap: 4px; }
 .sw-slot { flex: 1; display: flex; align-items: flex-end; justify-content: center; }

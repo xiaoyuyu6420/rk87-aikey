@@ -1,6 +1,6 @@
 // RK87 AIKey 主进程：托盘 + 设置窗口 + HID 监听 + 动作分发
 
-const { app, Tray, Menu, BrowserWindow, ipcMain, nativeImage, shell, powerSaveBlocker } = require('electron');
+const { app, Tray, Menu, BrowserWindow, ipcMain, nativeImage, shell, powerSaveBlocker, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { execFile } = require('child_process');
@@ -28,6 +28,7 @@ let pcmBatch = [];       // 攒 ~120ms 批量下发渲染进程
 let pcmBatchTimer = null;
 let psBlockerId = null;    // 推流期电源阻塞（防 App Nap 拖慢主进程 timer）
 let audioDedup = [];       // 双连接（USB+蓝牙）重复音频帧去重（短窗）
+let lowBatNotified = false; // 低电量一次性提醒（充电/回血后重新武装）
 
 // 常驻托盘应用：瞬时异常（如 stdout 管道断开的 EPIPE）不崩溃退出
 process.on('uncaughtException', e => {
@@ -144,6 +145,21 @@ function boot() {
     if (!on) stopPsBlocker();
   });
   session.on('audio', buf => onAudioPacket(buf));
+  // 电量上报（cmd=208，键盘主动推）：徽章 + 托盘 tooltip + 低电量一次性通知
+  session.on('battery', b => {
+    if (win && !win.isDestroyed()) win.webContents.send('battery', b);
+    if (tray) {
+      tray.setToolTip(`RK87 AIKey — ${b.charging ? '充电中 ' : ''}${b.level}%` +
+        (sessionOnline ? ` · 链路 ${Math.round(session.rttAvg || 0)}ms` : ' · 离线'));
+    }
+    if (!b.charging && b.level < 20 && !lowBatNotified) {
+      lowBatNotified = true;
+      const n = new Notification({ title: 'RK87 AIKey', body: `键盘电量不足 ${b.level}%，记得充电` });
+      n.show();
+    } else if (b.charging || b.level >= 30) {
+      lowBatNotified = false; // 插上电/回血后重新武装提醒
+    }
+  });
   session.start();
 
   // 普通（非 AI）模式（mac）：F1-F12/PrtSc 走标准报文进回注模块；绑定了动作的键在此拦截。
@@ -256,12 +272,31 @@ function currentPassFlags() {
   return process.platform === 'darwin' ? kbdInject.currentModFlags() : 0;
 }
 
+// 语音键透传的合成修饰键（仅 win32）：微信输入法「按住说话」要求快捷键必须含
+// Ctrl/Alt/Shift/Win，纯功能键配不进去。开启后透传序列变为
+// down: Ctrl↓ F10↓ / up: F10↑ Ctrl↑，用户在微信里配 Ctrl+F10 即可。
+// mac 不启用：mac 应用以事件 flags 判修饰，孤立修饰键事件不被普遍认可。
+function micPassModOf(keyId) {
+  if (process.platform !== 'win32') return null;
+  const m = cfg.settings.micPassMod;
+  if (!['ctrl', 'alt', 'shift'].includes(m)) return null;
+  return (cfg.settings.micTriggerKeys || []).includes(keyId) ? m : null;
+}
+
 function doPassDown(keyId, flags, pass) {
+  const mod = micPassModOf(keyId);
   ptDecision.set(keyId, false);
-  if (pass && actions.postRawKey(keyId, true, flags)) ptDecision.set(keyId, true);
+  if (!pass) return;
+  if (mod) actions.postRawKey(mod, true, 0);
+  if (actions.postRawKey(keyId, true, flags)) ptDecision.set(keyId, true);
+  else if (mod) actions.postRawKey(mod, false, 0); // 主键发失败：修饰立即回收，不留卡键
 }
 function doPassUp(keyId, flags) {
-  if (ptDecision.get(keyId)) actions.postRawKey(keyId, false, flags);
+  const mod = micPassModOf(keyId);
+  if (ptDecision.get(keyId)) {
+    actions.postRawKey(keyId, false, flags);
+    if (mod) actions.postRawKey(mod, false, 0);
+  }
   ptDecision.delete(keyId);
 }
 
@@ -320,6 +355,7 @@ function releasePassthrough() {
   if (ptMicSettleTimer) { clearTimeout(ptMicSettleTimer); ptMicSettleTimer = null; }
   for (const [keyId, injected] of ptDecision) {
     if (injected) actions.postRawKey(keyId, false, 0);
+    if (injected) { const m = micPassModOf(keyId); if (m) actions.postRawKey(m, false, 0); }
   }
   ptDecision.clear();
 }

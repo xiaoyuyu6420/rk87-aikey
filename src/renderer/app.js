@@ -71,6 +71,13 @@ function initModeTabs() {
   window.aikey.onAiMode(setBadge);
   setBadge(!!state.aiMode);
 
+  // 电池徽章（cmd=208 键盘主动上报）
+  const bat = document.getElementById('battery-badge');
+  window.aikey.onBattery(b => {
+    bat.hidden = false;
+    bat.textContent = `${b.charging ? '⚡' : '🔋'}${b.level}%`;
+  });
+
   const tabs = document.querySelectorAll('.mode-tab');
   tabs.forEach(tab => {
     const cnt = document.createElement('span');
@@ -362,6 +369,18 @@ async function initMicBridge() {
     triggerBox.appendChild(label);
   }
 
+  // 透传修饰键（仅 Windows：微信输入法「按住说话」强制组合键）
+  if (navigator.userAgent.includes('Windows')) {
+    const modRow = document.getElementById('mic-pass-mod-row');
+    const modSel = document.getElementById('mic-pass-mod');
+    modRow.hidden = false;
+    modSel.value = state.settings.micPassMod || 'none';
+    modSel.onchange = async () => {
+      state.settings.micPassMod = modSel.value;
+      await window.aikey.setSettings({ micPassMod: modSel.value });
+    };
+  }
+
   optBridge.checked = !!state.settings.micBridgeEnabled;
   optBridge.onchange = async () => {
     state.settings.micBridgeEnabled = optBridge.checked;
@@ -593,6 +612,9 @@ async function refreshStats() {
   // 今日键位热力图（QWERTY 简化网格）
   renderHeatmap(s.today.keys || {});
 
+  // 轴体寿命（累计 ÷ 单键 5000 万次额定寿命，趣味估算）
+  renderSwitchLife(s.lifetime);
+
   // 近 7 天柱状图
   const weekBox = document.getElementById('stats-week');
   weekBox.innerHTML = '';
@@ -626,6 +648,35 @@ const HEATMAP_ROWS = [
   ['z','x','c','v','b','n','m','comma','period','slash'],
   [{ n: 'tab', w: 1.6 }, { n: 'space', w: 5 }, { n: 'enter', w: 1.6 }, { n: 'backspace', w: 1.8 }],
 ];
+// 轴体寿命：累计总击 + 最辛劳键的寿命进度条
+const SWITCH_LIFE = 50e6;
+function renderSwitchLife(life) {
+  const box = document.getElementById('switch-life');
+  if (!box) return;
+  box.innerHTML = '';
+  const total = (life && life.total) || 0;
+  const cap = document.createElement('div');
+  cap.className = 'lifetime-total';
+  cap.textContent = total ? `累计 ${total.toLocaleString()} 次` : '暂无累计数据（开始打字后出现）';
+  box.appendChild(cap);
+  const top = total && Object.entries(life.keys || {}).sort((a, b) => b[1] - a[1])[0];
+  if (!top) return;
+  const pct = top[1] / SWITCH_LIFE * 100;
+  const row = document.createElement('div');
+  row.className = 'tk-row';
+  const name = document.createElement('span');
+  name.className = 'tk-name';
+  name.textContent = keyLabel(top[0]);
+  const bar = document.createElement('div');
+  bar.className = 'tk-bar';
+  bar.style.width = Math.max(3, Math.min(100, pct)) + '%';
+  const val = document.createElement('span');
+  val.className = 'tk-count';
+  val.textContent = `${top[1].toLocaleString()} 次 · ${pct.toFixed(3)}%`;
+  row.append(name, bar, val);
+  box.appendChild(row);
+}
+
 function renderHeatmap(keys) {
   const box = document.getElementById('stats-heatmap');
   if (!box) return;

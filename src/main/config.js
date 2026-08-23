@@ -15,6 +15,9 @@ const DEFAULTS = {
     micBridgeEnabled: false,  // 键盘麦克风 → 虚拟声卡桥接
     micSinkId: '',            // 桥接播放设备（虚拟声卡播放端，如 CABLE Input）
     micTriggerKeys: ['f10', 'ai_key'], // 按住即开麦的键（可设置）
+    micPassMod: 'none',      // 语音键透传附加修饰键（none/ctrl/alt/shift；Windows 微信输入法
+                             // 「按住说话」强制要求组合键，纯 F10 配不进去 → 选 ctrl 后在
+                             // 微信里配 Ctrl+F10。仅 win32 生效，mac 无此限制）
     statsEnabled: true,      // 打字统计（只记每键计数与每日总数，纯本地 stats.json）
     fatigueEnabled: true,    // 疲劳提醒（连续打字满阈值弹系统通知）
     fatigueMinutes: 25,      // 疲劳提醒阈值（分钟）
