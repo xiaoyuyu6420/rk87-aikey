@@ -58,6 +58,10 @@ function initModeTabs() {
 
   const tabs = document.querySelectorAll('.mode-tab');
   tabs.forEach(tab => {
+    const cnt = document.createElement('span');
+    cnt.className = 'cnt';
+    cnt.title = '此模式下已自定义的键数';
+    tab.appendChild(cnt);
     tab.onclick = () => {
       if (currentMode === tab.dataset.mode) return;
       currentMode = tab.dataset.mode;
@@ -65,6 +69,15 @@ function initModeTabs() {
       renderList();
     };
   });
+  updateTabCounts();
+}
+
+// tab 上的「已自定义键数」角标：两个模式的配置分叉程度一眼可见
+//（初次两份相同是迁移拷贝，之后各改各的，数字就开始不同）
+function updateTabCounts() {
+  const count = map => Object.values(map || {}).filter(b => b && b.type && b.type !== 'none').length;
+  document.querySelector('#tab-fn .cnt').textContent = count(state.bindings) || '';
+  document.querySelector('#tab-ai .cnt').textContent = count(state.bindingsAi) || '';
 }
 
 const bindingsOf = () => (currentMode === 'ai' ? state.bindingsAi : state.bindings) || {};
@@ -214,6 +227,7 @@ async function runRow(row, { save = false } = {}) {
   if (save) {
     await window.aikey.setBinding(row.dataset.id, action, currentMode);
     bindingsOf()[row.dataset.id] = action;
+    updateTabCounts();
     toast(`已保存「${row.dataset.id}」（${currentMode === 'ai' ? 'AI 模式' : '普通模式'}）`);
     return; // 保存只保存，不执行；想看效果点「测试」
   }
