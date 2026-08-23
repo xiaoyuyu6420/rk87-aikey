@@ -131,6 +131,7 @@ class KeyboardWatcher extends EventEmitter {
 
     // AI 模式切换键：独立命令 cmd=209(0xD1)，data 1=进入 / 0=退出（实测确认）
     if (frame.cmd === 209 && frame.dataLen === 1) {
+      this.pressed.clear(); // 切换瞬间边沿状态作废：按住中的键不会再有对应抬起码
       this.emit('ai-mode', { on: frame.data[0] === 1 });
       return;
     }

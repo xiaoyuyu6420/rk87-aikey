@@ -45,7 +45,7 @@ function ensureCGEvent() {
   CG.source = CG.sourceCreate(0); // kCGEventSourceStateCombinedSessionState
 }
 const kCGHIDEventTap = 0;
-const kCGEventFlagMask = { shift: 0x20000, control: 0x40000, alternate: 0x80000, command: 0x100000 };
+const kCGEventFlagMask = { shift: 0x20000, control: 0x40000, alternate: 0x80000, command: 0x100000, secondaryFn: 0x800000 };
 
 // 只允许启动这几类可执行文件
 const LAUNCHABLE_EXT = IS_MAC
@@ -78,7 +78,7 @@ for (let i = 0; i < 26; i++) VK_WIN[String.fromCharCode(97 + i)] = 0x41 + i; // 
 
 // macOS 修饰键名映射：win→Cmd（Mac 上语义等同），alt→Option
 const VK_MAC = {
-  ctrl: 59, shift: 56, alt: 58, option: 58, win: 55, cmd: 55, command: 55,
+  ctrl: 59, shift: 56, alt: 58, option: 58, win: 55, cmd: 55, command: 55, fn: 63,
   enter: 36, esc: 53, tab: 48, space: 49, backspace: 51,
   delete: 117, insert: 114,
   up: 126, down: 125, left: 123, right: 124,
@@ -97,7 +97,7 @@ Object.assign(VK_MAC, MAC_LETTERS);
 const VK = IS_MAC ? VK_MAC : VK_WIN;
 
 // macOS 修饰键 flags（发给主键事件，应用普遍以 flags 为准）
-const MAC_MOD_FLAG = { ctrl: kCGEventFlagMask.control, shift: kCGEventFlagMask.shift, alt: kCGEventFlagMask.alternate, option: kCGEventFlagMask.alternate, win: kCGEventFlagMask.command, cmd: kCGEventFlagMask.command, command: kCGEventFlagMask.command };
+const MAC_MOD_FLAG = { ctrl: kCGEventFlagMask.control, shift: kCGEventFlagMask.shift, alt: kCGEventFlagMask.alternate, option: kCGEventFlagMask.alternate, win: kCGEventFlagMask.command, cmd: kCGEventFlagMask.command, command: kCGEventFlagMask.command, fn: kCGEventFlagMask.secondaryFn };
 
 function vkOf(name) {
   const n = name.trim().toLowerCase();
@@ -148,6 +148,21 @@ function sendHotkey(combo) {
   }
 }
 
+// 透传回注：按平台发一个原始 down/up 键事件（与 sendHotkey 不同，不自动抬键）。
+// 功能键透传需要 down 与 up 严格配对（长按场景），由调用方保证时序。
+// mac 可带修饰键 flags（从回注模块取当前物理修饰键状态，保证 Shift+F10 等组合正确）。
+function postRawKey(name, down, flags) {
+  const vk = vkOf(name);
+  if (vk === null) return false;
+  try {
+    if (IS_MAC) postMac(vk, down, flags || 0);
+    else pressKeyWin(vk, !down);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 // action 形状（config.json bindings 的值）：
 //   { type:'none' }
 //   { type:'app',    target:'C:/path/app.exe 或 xxx.bat', afterHotkey?, afterDelay? }
@@ -188,4 +203,4 @@ function scheduleAfter(action) {
 }
 
 // VK_KEYNAMES：按平台选好的「键名→键码」表（打字统计用它构建反向轮询表）
-module.exports = { run, sendHotkey, vkOf, VK_KEYNAMES: VK };
+module.exports = { run, sendHotkey, postRawKey, vkOf, VK_KEYNAMES: VK };
