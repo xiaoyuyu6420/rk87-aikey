@@ -1,7 +1,7 @@
 {
   "name": "rk87-aikey",
   "productName": "RK87 AIKey",
-  "version": "0.7.7",
+  "version": "0.7.10",
   "description": "RK R87 Pro AI 键盘自定义功能键 + 麦克风工具（无需官方 RK-AI 软件）",
   "main": "src/main/index.js",
   "author": "xiaoyuyu6420",
