@@ -1,0 +1,9 @@
+[ {
+   "description": "",
+   "devtoolsFrontendUrl": "/devtools/inspector.html?ws=127.0.0.1:9333/devtools/page/04E042D92755A4ECAE67856F6FFC14F2",
+   "id": "04E042D92755A4ECAE67856F6FFC14F2",
+   "title": "",
+   "type": "page",
+   "url": "file:///Users/munich/Desktop/rk87-AIKey/src/renderer/index.html",
+   "webSocketDebuggerUrl": "ws://127.0.0.1:9333/devtools/page/04E042D92755A4ECAE67856F6FFC14F2"
+} ]
