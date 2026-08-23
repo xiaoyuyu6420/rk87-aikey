@@ -24,12 +24,18 @@ require.cache[nodeHidPath] = {
   id: nodeHidPath, filename: nodeHidPath, loaded: true,
   exports: { HID: FakeHID, devices: () => [{ vendorId: 0x248a, productId: 0x8243, usagePage: 0xff12, interface: -1, path: 'bt-0', release: 0 }] },
 };
+// win32：kb-session.loadBinding 走 vendor mi-hid 而非 node-hid（见 kb-session.js），
+// 不 stub 会打开真实键盘命令口
+if (process.platform === 'win32') {
+  const vendorPath = require.resolve(path.join(ROOT, 'vendor/mi-hid/prebuilds/HID-win32-x64/node-napi-v4.node'));
+  require.cache[vendorPath] = { id: vendorPath, filename: vendorPath, loaded: true, exports: require.cache[nodeHidPath].exports };
+}
 
 let pass = 0, fail = 0;
 const ok = (cond, name) => { cond ? (pass++, console.log('  ✓', name)) : (fail++, console.log('  ✗ FAIL:', name)); };
 
-const { KeySession } = require(path.join(ROOT, 'src/main/kb-session.js'));
-const kbdInject = require(path.join(ROOT, 'src/main/kbd-inject.js'));
+const { KeySession } = require('../src/main/kb-session.js');
+const kbdInject = require('../src/main/kbd-inject.js');
 
 const HB104 = Buffer.from([5, 0xff, 0xf1, 0xfe, 0xc0, 104, 0, 0xef, 0, 0, 0, 0, 0, 0, 0, 0]);
 
@@ -91,6 +97,10 @@ const HB104 = Buffer.from([5, 0xff, 0xf1, 0xfe, 0xc0, 104, 0, 0xef, 0, 0, 0, 0, 
     s.stop();
   }
 
+  // T5 测 kbd-inject（mac CGEvent 回注）；win32 无此路径（feedKeyboardReport 直接短路）
+  if (process.platform !== 'darwin') {
+    console.log('[T5] 跳过：kbd-inject 仅 mac 有回注路径');
+  } else {
   console.log('[T5] ErrorRollOver 不误抬 + autorepeat 熔断');
   {
     const mkRpt = (mod, ...keys) => Buffer.from([2, mod, 0, ...keys].slice(0, 9));
@@ -113,6 +123,7 @@ const HB104 = Buffer.from([5, 0xff, 0xf1, 0xfe, 0xc0, 104, 0, 0xef, 0, 0, 0, 0, 
     kbdInject.feedKeyboardReport(mkRpt(0, 0, 0, 0, 0, 0, 0));
     ok(kbdInject.getDiag().postOk === b3, '熔断后状态干净（全零帧零事件）');
     kbdInject.reset();
+  }
   }
 
   console.log(`\n结果: ${pass} pass / ${fail} fail`);

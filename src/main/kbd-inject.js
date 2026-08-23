@@ -12,9 +12,9 @@ let CG = null;
 // 单位 1/60s tick），读不到用 mac 默认手感（500ms/80ms）
 function loadRepeatPrefs() {
   try {
-    const { execSync } = require('child_process');
+    const { execFileSync } = require('child_process');
     const readTick = key => {
-      const v = Number(execSync(`defaults read -g ${key} 2>/dev/null`, { encoding: 'utf8' }).trim());
+      const v = Number(execFileSync('defaults', ['read', '-g', key], { encoding: 'utf8' }).trim());
       return Number.isFinite(v) && v > 0 ? v : 0;
     };
     const init = readTick('InitialKeyRepeat');

@@ -14,9 +14,14 @@ require.cache[nodeHidPath] = {
   id: nodeHidPath, filename: nodeHidPath, loaded: true,
   exports: { HID: FakeHID, devices: () => [{ vendorId: 0x248a, productId: 0x8243, usagePage: 0xff12, interface: -1, path: 'bt-0', release: 0 }] },
 };
+// win32：kb-session.loadBinding 走 vendor mi-hid 而非 node-hid，不 stub 会打开真实键盘
+if (process.platform === 'win32') {
+  const vendorPath = require.resolve(path.join(ROOT, 'vendor/mi-hid/prebuilds/HID-win32-x64/node-napi-v4.node'));
+  require.cache[vendorPath] = { id: vendorPath, filename: vendorPath, loaded: true, exports: require.cache[nodeHidPath].exports };
+}
 
-const { KeySession } = require(path.join(ROOT, 'src/main/kb-session.js'));
-const keymap = require(path.join(ROOT, 'src/main/keymap.js'));
+const { KeySession } = require('../src/main/kb-session.js');
+const keymap = require('../src/main/keymap.js');
 
 let pass = 0, fail = 0;
 const ok = (c, n) => { c ? (pass++, console.log('  ✓', n)) : (fail++, console.log('  ✗ FAIL:', n)); };
