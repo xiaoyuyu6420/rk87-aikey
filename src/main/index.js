@@ -204,7 +204,8 @@ function onKey({ code, keyId, phase }) {
 // 麦克风触发键的 down 透传延迟：先开麦让音频流（键盘→虚拟声卡）建立，
 // 输入法再收到 F10 开始录音，否则录到开头一段静音。
 // 快速点按（延迟未到就松开）则立即补发 down+up，保持点击语义不丢。
-const PT_MIC_DELAY = 250;
+const PT_MIC_DELAY = 600; // 音频链（固件开麦→PCM→桥接→虚拟声卡）建立需数百 ms，
+                          // 太短则输入法开始录音时还没声音（检测不到麦克风）
 const ptPending = new Map(); // keyId -> timer（延迟中的透传 down）
 
 function doPassDown(keyId, flags, pass) {
