@@ -176,10 +176,11 @@ function onKey({ code, keyId, phase }) {
 
 // 透传回注（AI 模式厂商码路径）。down 时记下决定，up 按记录执行；
 // 无键码的键（AI 键/扩展键位，无原功能可言）发送失败不记状态。
-// 麦克风触发键的 down 透传延迟：先开麦让音频流（键盘→虚拟声卡）建立，
+// 麦克风触发键的 down 透传延迟：先开麦让音频流（键盘→固件→虚拟声卡缓冲）
+// 充分建立（实测链路约 300-400ms），输入法再收到 F10 开始录音
 // 输入法再收到 F10 开始录音，否则录到开头一段静音。
 // 快速点按（延迟未到就松开）则立即补发 down+up，保持点击语义不丢。
-const PT_MIC_DELAY = 250;
+const PT_MIC_DELAY = 400;
 const ptPending = new Map(); // keyId -> timer（延迟中的透传 down）
 
 function doPassDown(keyId, flags, pass) {
