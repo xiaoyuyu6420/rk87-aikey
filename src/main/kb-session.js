@@ -70,6 +70,9 @@ class KeySession extends EventEmitter {
     this.rttBad = 0;          // 连续 RTT 超标次数
     this.pressed = new Set(); // 按键边沿去重
     this.pressedTs = new Map(); // keyId -> 按下时刻（抬起看护用）
+    this.rx = { std: 0, vendor: 0, audio: 0, other: 0 }; // 收包计数（诊断：区分报文断流 vs 注入失效）
+    this._rxMark = { std: 0, vendor: 0, audio: 0, other: 0 };
+    this._lastStatTs = Date.now();
     this.lastKey = null;
     this.channel = 0xf1;      // 写帧通道前缀
     this.transport = '';      // '2.4G-dongle' | '蓝牙'
@@ -124,6 +127,7 @@ class KeySession extends EventEmitter {
         this._write(5, [], 'heartbeat');
         this._voiceStopGuard();
         this._keyUpWatchdog();
+        this._rxStats();
       }, 1000);
       // 握手超时：键盘不在此口上（如 dongle 插着但键盘走蓝牙）→ 换口
       if (this.hsTimer) clearTimeout(this.hsTimer);
@@ -166,15 +170,18 @@ class KeySession extends EventEmitter {
     // macOS 蓝牙/2.4G：标准键盘报文（reportId=2，9字节）也被路由到本口，
     // 交回注模块转发回系统，否则打字失灵；reportId=6（多媒体/consumer）暂不回注
     if (process.platform === 'darwin' && data[0] === 2 && data.length >= 9) {
+      this.rx.std++;
       kbdInject.feedKeyboardReport(data);
       return;
     }
     if (process.platform === 'darwin' && data[0] === 6 && data.length >= 15) {
+      this.rx.other++;
       // consumer（多媒体键）报文：不得进命令状态机（usage 字节会被误当 cmd）
       return;
     }
     // 音频流直通（renderer 桥接消费）
     if (data[0] === 0x1b) {
+      this.rx.audio++;
       this.lastAudioTs = Date.now();
       this.emit('audio', data);
       return;
@@ -242,11 +249,28 @@ class KeySession extends EventEmitter {
     }
     // 按键上报（cmd=159，payload[0]=键码）：蓝牙/2.4G 连接时按键只走此口，需转发
     if (cmd === 159 && len === 1) {
+      this.rx.vendor++;
       this._handleKey(payload[0]);
       return;
     }
     // 其他命令帧（156/208/177…）透传给需要的地方
     this.emit('cmd', { cmd, data: payload });
+  }
+
+  // 收包统计（每 10s 一条）：区分两类「打字失灵」——
+  //   标准帧持续到达但打不出字 → CGEvent 注入失效（辅助功能授权被撤），查授权
+  //   标准帧归零 → 报文断流（链路/读循环问题），重连可解
+  _rxStats() {
+    const now = Date.now();
+    if (now - this._lastStatTs < 10000) return;
+    if (!this.connected) { this._lastStatTs = now; this._rxMark = { ...this.rx }; return; }
+    const d = k => this.rx[k] - this._rxMark[k];
+    const diag = kbdInject.getDiag();
+    const injOk = diag.postOk - (this._injMark?.ok || 0);
+    this._injMark = { ...diag };
+    console.log(`[session] 流量(10s): 标准${d('std')} 厂商${d('vendor')} 音频${d('audio')} | 注入${injOk}${diag.postFail ? ' 异常' + diag.postFail : ''}`);
+    this._rxMark = { ...this.rx };
+    this._lastStatTs = now;
   }
 
   // 语音停止看护：松开语音键（stopVoice 已发 cmd=4）后若固件仍持续推音频流，
