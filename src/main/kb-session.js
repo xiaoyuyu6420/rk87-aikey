@@ -206,6 +206,10 @@ class KeySession extends EventEmitter {
     const cmd = data[5];
     const len = data[6];
     const payload = data.slice(7, 7 + len);
+    // DIAG-PROBE：心跳回包若带状态 payload，打印（找「校验通道」）
+    if (cmd === 104 && len > 0) {
+      console.log(`[probe] 104 payload hex=${payload.toString('hex')}`);
+    }
     // 命令状态机
     if (cmd === 104) {
       this.pendingHb = false;
@@ -284,11 +288,25 @@ class KeySession extends EventEmitter {
     }
     // 按键上报（cmd=159，payload[0]=键码）：蓝牙/2.4G 连接时按键只走此口，需转发
     if (cmd === 159 && len === 1) {
+      // DIAG-PROBE（临时观测）：逐条打印 159 到达时刻，验证「按住期间固件是否
+      // 周期性重发 down」（若是 → 可做证据驱动的松手检测，取代超时看护）
+      {
+        const pk = lookupKey(payload[0]);
+        console.log(`[probe] 159 code=0x${payload[0].toString(16)} phase=${pk ? pk.phase : '?'} t=${Date.now()}`);
+      }
       this.rx.vendor++;
       this._handleKey(payload[0]);
       return;
     }
     // 其他命令帧（156/208/177…）透传给需要的地方
+    // DIAG-PROBE：打印所有命令帧的 cmd+payload（限流：同内容 1s 一条）
+    {
+      const sig = cmd + ':' + payload.toString('hex');
+      if (sig !== this._lastCmdSig || Date.now() - (this._lastCmdTs || 0) > 1000) {
+        console.log(`[probe] cmd=${cmd} len=${len} hex=${payload.toString('hex')}`);
+        this._lastCmdSig = sig; this._lastCmdTs = Date.now();
+      }
+    }
     this.emit('cmd', { cmd, data: payload });
   }
 
@@ -352,7 +370,16 @@ class KeySession extends EventEmitter {
     if (this.lastKey && this.lastKey.code === code && now - this.lastKey.ts < 60) return;
     this.lastKey = { code, ts: now };
     if (key.phase === 'down') {
-      if (this.pressed.has(key.id)) return;
+      if (this.pressed.has(key.id)) {
+        // 边沿协议不变量：正常序列只能是 down→up→down，down→down 不可能正常
+        // 发生 → 唯一解释是上一个 up 报文被蓝牙丢了（此时固件还在推流、输入法
+        // 还在录音）。自愈：补发 up 事件（上层会关麦+补透传抬起，输入法正常
+        // 结束），再放行新 down —— 用户「看到没关再按一下」的本能变成有效恢复。
+        // 无超时假设：真按住期间第二个 down 不会出现，长按任意久零误判。
+        console.log(`[session] ${key.id} 重复按下（抬起报文丢失），自动补抬起自愈`);
+        this.pressed.delete(key.id);
+        this.emit('key', { code, keyId: key.id, phase: 'up' });
+      }
       this.pressed.add(key.id);
       this.emit('key', { code, keyId: key.id, phase: 'down' });
     } else {
@@ -383,6 +410,7 @@ class KeySession extends EventEmitter {
     this.hbMiss = 0;
     if (this.hbTimer) { clearInterval(this.hbTimer); this.hbTimer = null; }
     if (this.hsTimer) { clearTimeout(this.hsTimer); this.hsTimer = null; }
+    if (this._probe12) { clearInterval(this._probe12); this._probe12 = null; }
     this._closeDev();
     // 记住失败口：同轮重连优先试别的口（键盘可能换了连接模式）
     if (this.devPath) this.triedPaths.add(this.devPath);
@@ -483,6 +511,7 @@ class KeySession extends EventEmitter {
     if (this.hbTimer) { clearInterval(this.hbTimer); this.hbTimer = null; }
     if (this.watchTimer) { clearTimeout(this.watchTimer); this.watchTimer = null; }
     if (this.hsTimer) { clearTimeout(this.hsTimer); this.hsTimer = null; }
+    if (this._probe12) { clearInterval(this._probe12); this._probe12 = null; }
     if (this._ghostWatch) { clearTimeout(this._ghostWatch); this._ghostWatch = null; }
     // 退出前若固件还在推流，尽力补一次停止（写是同步 SetReport，能赶在 close 前送达）
     if (this.dev && (this.micOn || (this.lastAudioTs && Date.now() - this.lastAudioTs < 2000))) {
