@@ -76,6 +76,7 @@ select:focus, input:focus { outline: none; border-color: var(--accent); }
 label.after-line { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; flex: 1; }
 label.after-line input[type=number] { width: 64px; flex: 0 0 auto; }
 label.after-line input[type=text] { flex: 1; }
+label.pass-line { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; flex-basis: 100%; cursor: pointer; }
 .none-hint { color: var(--muted); font-size: 12px; }
 
 .toast {
