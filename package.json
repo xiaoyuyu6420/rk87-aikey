@@ -1,7 +1,7 @@
 {
   "name": "rk87-aikey",
   "productName": "RK87 AIKey",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "RK R87 Pro AI 键盘自定义功能键 + 麦克风工具（无需官方 RK-AI 软件）",
   "main": "src/main/index.js",
   "author": "xiaoyuyu6420",
@@ -35,7 +35,10 @@
       "package.json"
     ],
     "win": {
-      "target": ["portable", "nsis"],
+      "target": [
+        "portable",
+        "nsis"
+      ],
       "icon": "assets/icon.png"
     },
     "portable": {
@@ -48,8 +51,20 @@
     },
     "mac": {
       "target": [
-        { "target": "zip", "arch": ["arm64", "x64"] },
-        { "target": "dmg", "arch": ["arm64", "x64"] }
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
       ],
       "category": "public.app-category.utilities",
       "icon": "assets/icon.png",
