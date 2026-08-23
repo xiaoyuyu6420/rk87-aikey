@@ -59,6 +59,7 @@ function boot() {
 
   // 键盘命令会话：蓝牙口心跳+验证，驱动固件开麦（完全自主，无需官方 RK-AI）
   session = new KeySession();
+  session.micKeyIds = new Set(cfg.settings.micTriggerKeys || []); // 语音键（抬起看护/重放只对这些键做）
   session.on('key', onKey); // 蓝牙连接时按键上报走会话口
   session.on('ai-mode', ({ on }) => onAiMode(on));
   session.on('state', ({ connected, reason }) => {
@@ -353,6 +354,9 @@ ipcMain.handle('set-settings', (_e, settings) => {
   cfg.settings = { ...cfg.settings, ...settings };
   config.save(cfg);
   if ('autostart' in settings) setAutostart(settings.autostart);
+  if ('micTriggerKeys' in settings && session) {
+    session.micKeyIds = new Set(settings.micTriggerKeys || []);
+  }
   if ('statsEnabled' in settings && stats) {
     settings.statsEnabled ? stats.start() : stats.stop();
   }

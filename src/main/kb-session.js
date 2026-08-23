@@ -70,6 +70,7 @@ class KeySession extends EventEmitter {
     this.rttBad = 0;          // 连续 RTT 超标次数
     this.pressed = new Set(); // 按键边沿去重
     this.pressedTs = new Map(); // keyId -> 按下时刻（抬起看护用）
+    this.micKeyIds = new Set(); // 语音触发键（index.js 注入；抬起看护/重放只对这些键做）
     this.lastKey = null;
     this.channel = 0xf1;      // 写帧通道前缀
     this.transport = '';      // '2.4G-dongle' | '蓝牙'
@@ -237,6 +238,7 @@ class KeySession extends EventEmitter {
     // AI 模式切换键上报
     if (cmd === 209 && len === 1) {
       this.pressed.clear(); // 切换瞬间边沿状态作废：按住中的键不会再有对应抬起码
+      this.pressedTs.clear();
       this.emit('ai-mode', { on: payload[0] === 1 });
       return;
     }
@@ -282,18 +284,21 @@ class KeySession extends EventEmitter {
     }
   }
 
-  // 抬起看护：蓝牙劣化时 cmd=159 的抬起码会卡在缓冲/丢失——透传的 keyUp 发不出
-  // （输入法语音关不掉），且 pressed 残留导致下一次按下的 down 被边沿去重吞掉
-  // （长按唤不起，直到打字把缓冲冲开才恢复）。按下 >15s 仍无抬起视为丢失，
-  // 强制补发 up 事件走完整释放链路（透传 keyUp + mic 联动关麦）。
-  // 副作用：真按住超过 15s 会被误判松开（语音中断），微信语音单句很少超此限。
+  // 抬起看护（音频流驱动，不按时间猜）：蓝牙劣化时 cmd=159 的抬起码会卡在缓冲/
+  // 丢失——透传的 keyUp 发不出（输入法语音关不掉），且 pressed 残留导致下一次
+  // 按下的 down 被边沿去重吞掉（长按唤不起）。
+  // 音频流在推 = 固件仍在录音 = 物理仍按住：绝不释放（长按语音说多久都不误关）。
+  // 流已停（松开时固件即停推）但语音键仍挂着 = 抬起码丢失：按下 5s 后补发 up
+  // 走完整释放链路（透传 keyUp + mic 联动关麦）。只对语音键判定（有流可参照）。
   _keyUpWatchdog() {
     if (this.pressedTs.size === 0) return;
     const now = Date.now();
+    if (this.lastAudioTs && now - this.lastAudioTs < 2000) return; // 流在推 = 还按着
     for (const [id, ts] of this.pressedTs) {
-      if (now - ts < 15000) continue;
+      if (!this.micKeyIds.has(id)) continue;
+      if (now - ts < 5000) continue;
       const def = KEY_DEFS.find(d => d.id === id);
-      console.log(`[session] ${id} 抬起报文丢失（>15s），watchdog 强制释放`);
+      console.log(`[session] ${id} 抬起报文丢失（流已停 ${Math.round((now - ts) / 1000)}s），watchdog 强制释放`);
       this.pressed.delete(id);
       this.pressedTs.delete(id);
       if (def) this.emit('key', { code: def.up, keyId: id, phase: 'up' });
@@ -307,7 +312,15 @@ class KeySession extends EventEmitter {
     if (this.lastKey && this.lastKey.code === code && now - this.lastKey.ts < 60) return;
     this.lastKey = { code, ts: now };
     if (key.phase === 'down') {
-      if (this.pressed.has(key.id)) return;
+      if (this.pressed.has(key.id)) {
+        // 语音键重复按下且音频流已停 = 上一轮抬起码丢失（蓝牙劣化卡缓冲/丢包）：
+        // 先补发 up 释放旧状态（透传 keyUp + 关麦）再放行本次按下，否则第二次长按唤不起。
+        // 流还在推则视为长按重复报文/双连接重复，照旧吞掉。
+        const audioActive = this.lastAudioTs && now - this.lastAudioTs < 2000;
+        if (!(this.micKeyIds.has(key.id) && !audioActive)) return;
+        console.log(`[session] ${key.id} 重复按下且流已停：判定上一轮抬起丢失，补发 up`);
+        this.emit('key', { code: key.up, keyId: key.id, phase: 'up' });
+      }
       this.pressed.add(key.id);
       this.pressedTs.set(key.id, Date.now());
       this.emit('key', { code, keyId: key.id, phase: 'down' });
