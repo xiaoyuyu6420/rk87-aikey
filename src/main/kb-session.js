@@ -275,6 +275,14 @@ class KeySession extends EventEmitter {
   }
 
   // ---------- 对外控制 ----------
+  // 手动强制重连（托盘菜单）：蓝牙链路半死（心跳在线但打字报文停滞）时自恢复，
+  // 免去用户去系统设置切蓝牙
+  reconnect() {
+    if (this.stopped) return;
+    if (this.dev) this._onDisconnect('manual-reconnect');
+    else this._open();
+  }
+
   askVoice() {
     if (!this.connected) return false;
     this._write(3, [], 'ask-voice');
