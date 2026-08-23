@@ -36,10 +36,13 @@ if (!gotLock) {
   app.quit();
 } else {
   app.on('second-instance', () => showWindow());
+  app.on('activate', () => showWindow()); // mac：点 Dock/应用图标重新弹设置窗口
   app.whenReady().then(boot);
 }
 
 function boot() {
+  // mac 菜单栏应用：Dock 不占位（点 x 关窗后只剩顶部状态栏图标；窗口随时可从托盘唤回）
+  if (process.platform === 'darwin') app.dock.hide();
   cfg = config.load();
 
   watcher = new KeyboardWatcher();
