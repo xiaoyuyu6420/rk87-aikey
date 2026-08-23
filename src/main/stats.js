@@ -199,7 +199,15 @@ class TypingStats {
       fs.writeFileSync(tmp, JSON.stringify({ days: this.days }), 'utf8');
       fs.renameSync(tmp, p); // 原子替换，避免写一半损坏
     } catch (_) {
-      this.dirty = true; // 写盘失败：下次再试
+      // 写盘失败（卷满/权限）：不能就此转为每 tick 重试——lastDirtyTs 停更会让
+      // 每个轮询周期都触发一次同步写风暴（每 15ms 四连 syscall，打字回注抖动）。
+      // 把 lastDirtyTs 拨到未来：60s 内不再自动重试（有新击键仍会满 200 键落盘）
+      this.dirty = true;
+      this.lastDirtyTs = Date.now() + 60000;
+      if (!this._failLogged) {
+        this._failLogged = true;
+        console.log('[stats] 落盘失败（60s 后重试）:', _ && _.message);
+      }
     }
   }
 

@@ -8,6 +8,26 @@
 const IS_MAC = process.platform === 'darwin';
 let CG = null;
 
+// 按住重复参数：对齐用户系统偏好（defaults -g InitialKeyRepeat/KeyRepeat，
+// 单位 1/60s tick），读不到用 mac 默认手感（500ms/80ms）
+function loadRepeatPrefs() {
+  try {
+    const { execSync } = require('child_process');
+    const readTick = key => {
+      const v = Number(execSync(`defaults read -g ${key} 2>/dev/null`, { encoding: 'utf8' }).trim());
+      return Number.isFinite(v) && v > 0 ? v : 0;
+    };
+    const init = readTick('InitialKeyRepeat');
+    const rep = readTick('KeyRepeat');
+    return {
+      delay: init ? Math.max(150, init * 1000 / 60) : 500,
+      interval: rep ? Math.max(30, rep * 1000 / 60) : 80,
+    };
+  } catch (_) {
+    return { delay: 500, interval: 80 };
+  }
+}
+
 function ensureCG() {
   if (CG || !IS_MAC) return;
   try {
@@ -71,8 +91,16 @@ const state = {
 // down，系统不会像原生键盘那样连发 → 长按不重复、backspace 不能连续删。
 // 这里自己模拟：按住超过 REPEAT_DELAY 后每 REPEAT_INTERVAL 补发一个带
 // autorepeat 标志的 keyDown（kCGKeyboardEventAutorepeat = 8）。
-const REPEAT_DELAY = 400;  // 初始延迟（对齐 mac 默认手感）
-const REPEAT_INTERVAL = 80; // 重复间隔
+//
+// 熔断（关键防御）：蓝牙丢「抬起」帧 + 用户停手（无后续报文触发兜底清空）时，
+// 残留键会被本 timer 无限连发（每 80ms 冒一个字符，直到用户再碰键盘）。HID 层
+// 无法区分「真按住」与「丢抬起」（两者都不再发报文），只能时限熔断：连续补发
+// 超过 REPEAT_FUSE 后自动抬起该键并留痕。取 6s：覆盖长按删 ~75 字符的常见场景；
+// 丢抬起帧的连发损害封顶 6s（用户看到冒字会立刻按键，实际更短）。
+const REPEAT_PREFS = IS_MAC ? loadRepeatPrefs() : { delay: 400, interval: 80 };
+const REPEAT_DELAY = REPEAT_PREFS.delay;
+const REPEAT_INTERVAL = REPEAT_PREFS.interval;
+const REPEAT_FUSE = 6000; // ms：单键连续补发的熔断时限
 let repeatTimer = null;
 
 function ensureRepeatTimer() {
@@ -85,6 +113,16 @@ function ensureRepeatTimer() {
       if (FNKEY_USAGE[k]) continue; // 功能键有拦截/透传配对逻辑，不参与重复
       const ts = state.downTs.get(k);
       if (ts === undefined || now - ts < REPEAT_DELAY) continue;
+      if (now - ts > REPEAT_FUSE) {
+        // 熔断：按住超时且期间无任何新报文确认（真按住通常伴随其他按键/报文）
+        console.log(`[inject] 按住超时熔断 usage=${k}（可能丢失抬起帧），自动抬起`);
+        state.keys.delete(k);
+        state.downTs.delete(k);
+        state.lastRep.delete(k);
+        const vk = HID2VK[k];
+        if (vk !== undefined) postKey(vk, false, flags);
+        continue;
+      }
       const last = state.lastRep.get(k) || ts + REPEAT_DELAY - REPEAT_INTERVAL;
       if (now - last < REPEAT_INTERVAL) continue;
       state.lastRep.set(k, now);
@@ -175,9 +213,14 @@ function feedKeyboardReport(data) {
 
   const mod = data[1] || 0;
   const keys = new Set();
+  let rollover = false;
   for (let i = 3; i < Math.min(9, data.length); i++) {
-    if (data[i]) keys.add(data[i]);
+    if (data[i] === 0x01) rollover = true; // HID ErrorRollOver：6KRO 溢出/防冲突
+    if (data[i] && data[i] !== 0x01) keys.add(data[i]);
   }
+  // ErrorRollOver 帧不代表任何键的真实状态（滚键盘/手掌压键时出现）：
+  // 按标准语义丢弃本帧，保留旧状态——否则 keys 为空集会误抬起所有已按住的键
+  if (rollover) return;
 
   // 防御：蓝牙丢包会导致“抬起”帧丢失，state.keys 里残留的键永远不会被清。
   // 用报文时间戳兜底：若距上次报文 >500ms 且本次有按键事件，强制清空旧状态

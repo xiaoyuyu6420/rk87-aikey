@@ -14,7 +14,7 @@ const kbdInject = require('./kbd-inject');
 
 const VID = 0x248a;
 const CMD_PID = 0x8243;
-const HANDSHAKE_TIMEOUT = 8000; // 开口后无握手回应即换口重试
+const HANDSHAKE_TIMEOUT = 4000; // 开口后无握手回应即换口重试（无回应=键盘不在该口，判定与时长无关，短超时加快多口轮换）
 
 // vendor 官方 mi-hid 库（静态路径，按平台选择）
 function loadBinding() {
@@ -72,6 +72,12 @@ class KeySession extends EventEmitter {
     this.rx = { std: 0, vendor: 0, audio: 0, other: 0 }; // 收包计数（诊断：区分报文断流 vs 注入失效）
     this._rxMark = { std: 0, vendor: 0, audio: 0, other: 0 };
     this._lastStatTs = Date.now();
+    this._writeFail = 0;     // 连续写失败次数（瞬时蓝牙拥塞不立即断线）
+    this._openFailStreak = 0; // 连续开口失败（exclusive 撞墙）→ 指数退避
+    this._hbSkip = 0;        // 语音推流期心跳降频计数
+    this.hostVoiceWanted = false; // 主机（app）当前是否希望推流（vs 固件自开麦）
+    this._pendingAskTs = 0;  // 主机 askVoice 发出时刻
+    this._ghostWatch = null; // 会话建立后幽灵推流补停的检查 timer
     this.lastKey = null;
     this.channel = 0xf1;      // 写帧通道前缀
     this.transport = '';      // '2.4G-dongle' | '蓝牙'
@@ -121,9 +127,15 @@ class KeySession extends EventEmitter {
       this._readLoop();
       // 官方时序：open 后立即发一次心跳
       this._write(5, [], 'heartbeat-initial');
-      // 每秒心跳（保持会话；也是握手第一步）+ 语音停止看护 + 收包统计
+      // 每秒心跳（保持会话；也是握手第一步）+ 语音停止看护 + 收包统计。
+      // 语音推流期心跳降为每 3s 一次：音频流本身就是会话活跃证据，心跳写反而
+      // 与音频帧争抢 BLE 链路带宽（v0.7.10 三连环的成因之一）
       this.hbTimer = setInterval(() => {
-        this._write(5, [], 'heartbeat');
+        const audioActive = this.lastAudioTs && Date.now() - this.lastAudioTs < 2000;
+        if (!audioActive || ++this._hbSkip >= 3) {
+          this._hbSkip = 0;
+          this._write(5, [], 'heartbeat');
+        }
         this._voiceStopGuard();
         this._rxStats();
       }, 1000);
@@ -136,7 +148,9 @@ class KeySession extends EventEmitter {
       console.log(`[session] 尝试命令口 ${this.transport} ${bt ? '' : devInfo.path}`);
     } catch (e) {
       if (this.devPath) this.triedPaths.add(this.devPath); // 开口失败也换口（如被官方软件独占）
-      if (/already open|exclusive/i.test(e.message)) this._reopenDelay = 2000;
+      // exclusive/already open = 系统尚未释放旧句柄（bluetoothd/dext 异步清理需数秒）。
+      // 连续撞墙改指数退避（3/6/12/24s 上限），固定 3s 连撞只会拖长瘫痪窗口
+      if (/already open|exclusive/i.test(e.message)) this._openFailStreak++;
       this.emit('state', { connected: false, reason: 'open-failed: ' + e.message });
       this._scheduleReconnect();
     }
@@ -145,10 +159,8 @@ class KeySession extends EventEmitter {
   _scheduleReconnect() {
     if (this.stopped) return;
     if (this.watchTimer) return;
-    // 独占拒绝（already open）= 系统尚未释放旧句柄，固定 3s 会连续撞墙
-    // （v0.7.10 日志：曾因此反复失败几十秒）；命中一次多等 2s
-    const delay = 3000 + (this._reopenDelay || 0);
-    this._reopenDelay = 0;
+    // exclusive 撞墙指数退避：3s → 6s → 12s → 24s（上限），撞墙一次清一轮
+    const delay = 3000 * Math.pow(2, Math.min(this._openFailStreak, 3));
     this.watchTimer = setTimeout(() => {
       this.watchTimer = null;
       this._open();
@@ -182,8 +194,10 @@ class KeySession extends EventEmitter {
       // consumer（多媒体键）报文：不得进命令状态机（usage 字节会被误当 cmd）
       return;
     }
-    // 音频流直通（renderer 桥接消费）
+    // 音频流直通（renderer 桥接消费）。长度校验：完整帧 62B（seq+60B 净荷），
+    // 蓝牙误码/截断的短帧不进解码器（否则出杂音）
     if (data[0] === 0x1b) {
+      if (data.length < 62) return;
       this.rx.audio++;
       this.lastAudioTs = Date.now();
       this.emit('audio', data);
@@ -196,20 +210,26 @@ class KeySession extends EventEmitter {
     if (cmd === 104) {
       this.pendingHb = false;
       this.hbMiss = 0;
+      this._writeFail = 0; // 读通道活着 = 链路通，写失败账清零
       // 心跳 RTT：链路质量信号。蓝牙劣化（如语音后连接参数未恢复）时打字报文
       // 延迟抖动/丢失（漏字、顺序错乱、手感发黏），但心跳仍在回应、假在线检测
-      // 抓不到——用 RTT 连续超标判定劣化，主动重连恢复链路
+      // 抓不到——用 RTT 连续超标判定劣化，主动重连恢复链路。
+      // 语音推流期豁免（与 _write 的心跳账豁免同源）：104 被音频帧排队延迟数秒
+      // 是正常现象不是劣化，若照记 rttBad，长按语音 ≥5s 必误判断线（v0.8.0 残留）。
+      const audioActive = this.lastAudioTs && Date.now() - this.lastAudioTs < 2000;
       if (this._hbTs) {
         const rtt = Date.now() - this._hbTs;
         this._hbTs = 0;
-        this.rttAvg = this.rttAvg ? this.rttAvg * 0.6 + rtt * 0.4 : rtt;
-        if (this.rttAvg > 250 && ++this.rttBad >= 5) {
-          console.log(`[session] 链路劣化（心跳 RTT 平均 ${Math.round(this.rttAvg)}ms），强制重连`);
-          this.rttBad = 0;
-          this._onDisconnect('link-degraded');
-          return;
+        if (!audioActive) {
+          this.rttAvg = this.rttAvg ? this.rttAvg * 0.6 + rtt * 0.4 : rtt;
+          if (this.rttAvg > 250 && ++this.rttBad >= 5) {
+            console.log(`[session] 链路劣化（心跳 RTT 平均 ${Math.round(this.rttAvg)}ms），强制重连`);
+            this.rttBad = 0;
+            this._onDisconnect('link-degraded');
+            return;
+          }
+          if (this.rttAvg <= 250) this.rttBad = 0;
         }
-        if (this.rttAvg <= 250) this.rttBad = 0;
       }
       if (!this.got104) {
         this.got104 = true;
@@ -226,15 +246,27 @@ class KeySession extends EventEmitter {
         this._write(17, [], 'sn');
         setTimeout(() => this._write(1, [], 'open'), 150);
         this.connected = true;
+        this._openFailStreak = 0;
         this.lastGoodPath = this.devPath;
         this.triedPaths.clear();
         if (this.hsTimer) { clearTimeout(this.hsTimer); this.hsTimer = null; }
         this.emit('state', { connected: true, transport: this.transport });
+        // 幽灵推流补停：上次断线/退出时固件可能仍在推流（cmd=4 丢失或没发）。
+        // 会话刚建立就收到音频流且主机并未请求开麦 → 补发一次停止
+        this._ghostWatch = setTimeout(() => {
+          this._ghostWatch = null;
+          if (this.connected && !this.hostVoiceWanted &&
+              this.lastAudioTs && Date.now() - this.lastAudioTs < 2000) {
+            console.log('[session] 检测到幽灵推流（主机未请求开麦但流在推），补发 cmd=4');
+            this._write(4, [], 'stop-voice-ghost');
+          }
+        }, 2500);
       }
       return;
     }
     if (cmd === 106) {
       this.micOn = true;
+      this.hostVoiceWanted = this._pendingAskTs > 0; // 106 是主机 askVoice 的回应还是固件自开麦
       this.emit('mic', { on: true, source: 'device' });
       return;
     }
@@ -286,6 +318,7 @@ class KeySession extends EventEmitter {
     const audioIdle = !this.lastAudioTs || now - this.lastAudioTs > 2000;
     if (audioIdle) {
       // 流已停（可能 107 丢了）：撤销看护，并补偿 UI 的开麦状态
+      if (this._fastRetry) { clearTimeout(this._fastRetry); this._fastRetry = null; }
       if (this.micOn) {
         this.micOn = false;
         this.emit('mic', { on: false, source: 'guard' });
@@ -334,9 +367,14 @@ class KeySession extends EventEmitter {
     this.verified = false;
     this.got104 = false;
     this.micOn = false;
+    this.hostVoiceWanted = false;
+    this._pendingAskTs = 0;
+    if (this._ghostWatch) { clearTimeout(this._ghostWatch); this._ghostWatch = null; }
+    if (this._fastRetry) { clearTimeout(this._fastRetry); this._fastRetry = null; }
     this._stopGuardTs = 0;
     this._stuckRetry = 0;
     this._hbTs = 0;
+    this._writeFail = 0;
     this.rttAvg = 0;
     this.rttBad = 0;
     this.pressed.clear(); // 断线清按键状态，避免重连后边沿错乱
@@ -345,18 +383,38 @@ class KeySession extends EventEmitter {
     this.hbMiss = 0;
     if (this.hbTimer) { clearInterval(this.hbTimer); this.hbTimer = null; }
     if (this.hsTimer) { clearTimeout(this.hsTimer); this.hsTimer = null; }
-    try { if (this.dev) this.dev.close(); } catch (_) {}
-    this.dev = null;
+    this._closeDev();
     // 记住失败口：同轮重连优先试别的口（键盘可能换了连接模式）
     if (this.devPath) this.triedPaths.add(this.devPath);
-    if (was) this.emit('state', { connected: false, reason, transport: this.transport });
+    if (was) {
+      this.emit('state', { connected: false, reason, transport: this.transport });
+      this.emit('mic', { on: false, source: 'disconnect' }); // UI 徽章兜底复位
+    }
     this._scheduleReconnect();
+  }
+
+  // 安全关闭 HID 句柄：node-hid 的 close() 在读回调 pending 时直接抛
+  // "read is still running"（HID.cc），空 catch 吞掉 = 句柄泄漏，泄漏句柄仍
+  // 收报文（双份投递挤占 BLE 带宽）。正确姿势：先置 null 让 _readLoop 的
+  // 递归链终止（worker 完成后不再发起新 read），延迟到 worker 空闲再 close。
+  _closeDev() {
+    const dev = this.dev;
+    this.dev = null;
+    if (!dev) return;
+    const tryClose = attempts => {
+      try { dev.close(); }
+      catch (_) {
+        if (attempts > 0) setTimeout(() => tryClose(attempts - 1), 200);
+      }
+    };
+    setTimeout(() => tryClose(5), 150);
   }
 
   _write(cmd, data, tag) {
     if (!this.dev) return;
     try {
       this.dev.write(frame(cmd, data, this.channel));
+      this._writeFail = 0;
       // 心跳发出去后要求下个周期前有 104 回应；连续 3 次丢失 = 假在线，主动断开重连
       if (cmd === 5 && this.connected) {
         // 长按语音时音频流（~60帧/s）占满读通道，104 回应会被挤延迟数秒——
@@ -371,7 +429,13 @@ class KeySession extends EventEmitter {
         this._hbTs = Date.now();
       }
     } catch (e) {
-      this._onDisconnect('write-failed(' + tag + '): ' + e.message);
+      // 瞬时蓝牙拥塞/句柄竞争的写失败不立即断线：连续 3 次都失败才判死
+      //（读通道若还活着，cmd=104 到达时会清零这笔账）
+      if (++this._writeFail >= 3) {
+        this._onDisconnect('write-failed(' + tag + '): ' + e.message);
+      } else {
+        console.log(`[session] 写失败（${tag}，第 ${this._writeFail} 次）: ${e.message}`);
+      }
     }
   }
 
@@ -387,6 +451,8 @@ class KeySession extends EventEmitter {
   askVoice() {
     if (!this.connected) return false;
     this._write(3, [], 'ask-voice');
+    this._pendingAskTs = Date.now(); // 主机请求开麦时刻：供 106 区分主机/固件自开麦
+    this.hostVoiceWanted = true;
     this._stopGuardTs = 0; // 新开麦：撤销上一轮的停止看护（防快速连按误伤）
     this._stuckRetry = 0;
     return true;
@@ -395,7 +461,20 @@ class KeySession extends EventEmitter {
   stopVoice() {
     if (!this.dev) return false;
     this._write(4, [], 'stop-voice');
+    this.hostVoiceWanted = false;
+    this._pendingAskTs = 0;
     this._stopGuardTs = Date.now(); // 启动停止看护：流不停则重发/强制重连
+    // 快路径：cmd=4 丢包时固件会多推 2.5s+（挤占打字带宽、语音框关不掉）。
+    // 600ms 后流若仍在推，立即重发一次，不等 2.5s 的慢看护
+    if (this._fastRetry) clearTimeout(this._fastRetry);
+    this._fastRetry = setTimeout(() => {
+      this._fastRetry = null;
+      if (this._stopGuardTs && this.connected &&
+          this.lastAudioTs && Date.now() - this.lastAudioTs < 1500) {
+        console.log('[session] 停止推流未生效（快路径），重发 cmd=4');
+        this._write(4, [], 'stop-voice-retry-fast');
+      }
+    }, 600);
     return true;
   }
 
@@ -404,9 +483,13 @@ class KeySession extends EventEmitter {
     if (this.hbTimer) { clearInterval(this.hbTimer); this.hbTimer = null; }
     if (this.watchTimer) { clearTimeout(this.watchTimer); this.watchTimer = null; }
     if (this.hsTimer) { clearTimeout(this.hsTimer); this.hsTimer = null; }
+    if (this._ghostWatch) { clearTimeout(this._ghostWatch); this._ghostWatch = null; }
+    // 退出前若固件还在推流，尽力补一次停止（写是同步 SetReport，能赶在 close 前送达）
+    if (this.dev && (this.micOn || (this.lastAudioTs && Date.now() - this.lastAudioTs < 2000))) {
+      try { this._write(4, [], 'stop-voice-quit'); } catch (_) {}
+    }
     kbdInject.reset();
-    try { if (this.dev) this.dev.close(); } catch (_) {}
-    this.dev = null;
+    this._closeDev();
   }
 }
 

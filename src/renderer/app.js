@@ -419,7 +419,12 @@ async function initMicBridge() {
       if (a > peak) peak = a;
     }
     bridge.queue.push(f);
-    if (bridge.queue.length > 40) bridge.queue.splice(0, bridge.queue.length - 40); // 防积压
+    // 防积压：超 5 帧（每帧 120ms 批 ≈ 600ms 缓冲）丢最旧。队首被丢弃时
+    // chunkOff 必须归零——它指向的是旧队首的内部偏移，不重置会从新队首中间开始播（跳音）
+    if (bridge.queue.length > 5) {
+      bridge.queue.splice(0, bridge.queue.length - 5);
+      bridge.chunkOff = 0;
+    }
     // 电平条（限频刷新）
     if (peak > 0 && !micLevelTimer) {
       micLevelTimer = setTimeout(() => {
@@ -440,13 +445,15 @@ async function initMicBridge() {
       opt.textContent = label + (/[ck][ai]?ble/i.test(label) ? '   ← 虚拟声卡' : '');
       selSink.appendChild(opt);
     }
-    // 默认选中：保存过的 / 自动探测含 CABLE 的 / 默认设备
+    // 默认选中：保存过的 / 自动探测虚拟声卡（Windows VB-CABLE / macOS BlackHole）/ 默认设备
     const saved = state.settings.micSinkId;
     if (saved && outs.some(d => d.deviceId === saved)) {
       selSink.value = saved;
     } else {
-      const cable = outs.find(d => /cable/i.test(d.label || ''));
+      const cable = outs.find(d => /cable|blackhole|virtual|loopback/i.test(d.label || ''));
       if (cable) selSink.value = cable.deviceId;
+      // 探测不到虚拟声卡时保持默认设备，但提示用户（否则语音进音箱、输入侧无声）
+      else toast('未找到虚拟声卡（BlackHole/VB-CABLE），请手动选择播放设备', true);
     }
     bridge.sinkId = selSink.value;
     applyBridge();

@@ -35,7 +35,10 @@ function load() {
       labels: { ...(cfg.labels || {}) },
       settings: { ...DEFAULTS.settings, ...(cfg.settings || {}) },
     };
-  } catch (_) {
+  } catch (e) {
+    // 损坏（写一半崩溃/磁盘错误）时留证并重建，避免用户绑定静默清零无法排查
+    try { fs.renameSync(configPath(), configPath() + '.corrupt'); } catch (_) {}
+    console.log('[config] 读取失败已重建（原文件存为 .corrupt）:', e.message);
     return JSON.parse(JSON.stringify(DEFAULTS));
   }
 }
@@ -43,7 +46,10 @@ function load() {
 function save(cfg) {
   const dir = path.dirname(configPath());
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(configPath(), JSON.stringify(cfg, null, 2), 'utf8');
+  // 原子写：先写临时文件再 rename 替换，避免写一半崩溃导致配置损坏
+  const tmp = configPath() + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), 'utf8');
+  fs.renameSync(tmp, configPath());
 }
 
 function defaultBinding(keyId) {

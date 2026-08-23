@@ -1,6 +1,6 @@
 // RK87 AIKey 主进程：托盘 + 设置窗口 + HID 监听 + 动作分发
 
-const { app, Tray, Menu, BrowserWindow, ipcMain, nativeImage, shell } = require('electron');
+const { app, Tray, Menu, BrowserWindow, ipcMain, nativeImage, shell, powerSaveBlocker } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { execFile } = require('child_process');
@@ -26,6 +26,8 @@ let micPipeline = null;
 let stats = null;          // 打字统计（系统级键状态轮询，只记计数）
 let pcmBatch = [];       // 攒 ~120ms 批量下发渲染进程
 let pcmBatchTimer = null;
+let psBlockerId = null;    // 推流期电源阻塞（防 App Nap 拖慢主进程 timer）
+let audioDedup = [];       // 双连接（USB+蓝牙）重复音频帧去重（短窗）
 
 // 常驻托盘应用：瞬时异常（如 stdout 管道断开的 EPIPE）不崩溃退出
 process.on('uncaughtException', e => {
@@ -64,6 +66,48 @@ if (!gotLock) {
   app.whenReady().then(boot);
 }
 
+// 共享音频包处理：双连接（USB+蓝牙同时活跃）时同一帧可能两路各到一次，
+// 短窗去重后再解码，避免 PCM 翻倍速/杂音
+function onAudioPacket(buf) {
+  try {
+    if (buf.length < 62) return;
+    const key = buf[1] * 65536 + buf[2] + buf[3] * 256;
+    const now = Date.now();
+    audioDedup = audioDedup.filter(e => now - e.ts < 120);
+    if (audioDedup.some(e => e.key === key)) return;
+    audioDedup.push({ key, ts: now });
+
+    startPsBlocker(); // 推流期防 App Nap 拖慢主进程 timer（pcmBatch/hbTimer）
+    flushMicPassthrough(); // 等音频流建立的透传 down：流已到，触发透传
+
+    if (!micPipeline) micPipeline = new MicPipeline();
+    pcmBatch.push(micPipeline.pushPacket(buf));
+    if (!pcmBatchTimer) {
+      pcmBatchTimer = setTimeout(() => {
+        pcmBatchTimer = null;
+        if (pcmBatch.length && win && !win.isDestroyed()) {
+          win.webContents.send('mic-pcm', Buffer.concat(pcmBatch));
+        }
+        pcmBatch = [];
+      }, 120);
+    }
+  } catch (e) {
+    console.log('[mic] 解码失败:', e.message);
+  }
+}
+
+function startPsBlocker() {
+  if (psBlockerId === null || !powerSaveBlocker.isStarted(psBlockerId)) {
+    psBlockerId = powerSaveBlocker.start('prevent-app-suspension');
+  }
+}
+function stopPsBlocker() {
+  if (psBlockerId !== null && powerSaveBlocker.isStarted(psBlockerId)) {
+    powerSaveBlocker.stop(psBlockerId);
+  }
+  psBlockerId = null;
+}
+
 function boot() {
   initFileLog(); // 先于一切业务日志初始化
   // mac 菜单栏应用：Dock 不占位（点 x 关窗后只剩顶部状态栏图标；窗口随时可从托盘唤回）
@@ -78,9 +122,12 @@ function boot() {
     if (!connected) releasePassthrough(); // 有线拔出时透传按下的键兜底抬起
     if (win) win.webContents.send('device-status', connected);
   });
+  // 有线口（8102）的音频流/麦克风状态同样进主管线（纯有线连接时语音才不至于静默失效）
+  watcher.on('audio', buf => onAudioPacket(buf));
+  watcher.on('mic', ({ on }) => {
+    if (win) win.webContents.send('mic-state', on);
+  });
   watcher.start();
-
-  // 音频/麦克风状态统一由 KeySession（蓝牙口）提供；watcher 仅负责按键监听
 
   // 键盘命令会话：蓝牙口心跳+验证，驱动固件开麦（完全自主，无需官方 RK-AI）
   session = new KeySession();
@@ -94,30 +141,21 @@ function boot() {
   });
   session.on('mic', ({ on }) => {
     if (win) win.webContents.send('mic-state', on);
+    if (!on) stopPsBlocker();
   });
-  session.on('audio', buf => {
-    try {
-      if (!micPipeline) micPipeline = new MicPipeline();
-      pcmBatch.push(micPipeline.pushPacket(buf));
-      if (!pcmBatchTimer) {
-        pcmBatchTimer = setTimeout(() => {
-          pcmBatchTimer = null;
-          if (pcmBatch.length && win && !win.isDestroyed()) {
-            win.webContents.send('mic-pcm', Buffer.concat(pcmBatch));
-          }
-          pcmBatch = [];
-        }, 120);
-      }
-    } catch (e) {
-      console.log('[mic] 解码失败:', e.message);
-    }
-  });
+  session.on('audio', buf => onAudioPacket(buf));
   session.start();
 
   // 普通（非 AI）模式（mac）：F1-F12/PrtSc 走标准报文进回注模块；绑定了动作的键在此拦截。
   // 返回 'block'=屏蔽原键、'passthrough'=动作+原键都触发、null=未绑定走原生回注
   kbdInject.setFnKeyPolicy(keyId => {
-    if (aiModeOn) onAiMode(false); // 功能键出现在标准报文 = 键盘实际处于普通模式
+    if (aiModeOn) {
+      // 功能键出现在标准报文 = 键盘实际处于普通模式。注意：onAiMode 会调
+      // kbdInject.reset() 清边沿状态——不能在 feedKeyboardReport 的调用栈内同步执行
+      //（会破坏本次报文 diff 的进行时状态，导致已按住的键被误判新按下=双字符），
+      // 挪到下一个事件循环
+      setImmediate(() => onAiMode(false));
+    }
     const binding = (cfg.bindings && cfg.bindings[keyId]) || { type: 'none' };
     if (binding.type === 'none') return null;
     console.log(`[key] ${keyId} down（标准报文，已拦截）`);
@@ -180,9 +218,10 @@ function onKey({ code, keyId, phase }) {
     win.webContents.send('key-event', { code, keyId: def.id, label: def.label, phase });
   }
   // 开麦键联动：按住 = 主动开麦，松开 = 关麦（键可在设置里勾选，默认 F10 + AI 键；空 = 全关）
+  let micAsked = false; // 开麦命令是否真正发出（离线时 false → 透传不等流）
   const micKeys = cfg.settings.micTriggerKeys || [];
   if (micKeys.includes(keyId) && session) {
-    if (phase === 'down') session.askVoice();
+    if (phase === 'down') micAsked = session.askVoice();
     else session.stopVoice();
   }
   // cmd=159 厂商码只在 AI 模式上报 → 此路径一律用 AI 模式绑定集
@@ -196,17 +235,26 @@ function onKey({ code, keyId, phase }) {
   }
   // 透传：未绑定任何动作（完全原生）或勾了透传 → 回注标准按键
   //（AI 模式下 F 键走厂商码不经系统，透传让输入法语音/亮度等原功能照常生效）
-  passthroughKey(keyId, phase, binding.passthrough === true || binding.type === 'none');
+  passthroughKey(keyId, phase, binding.passthrough === true || binding.type === 'none', micAsked);
 }
 
 // 透传回注（AI 模式厂商码路径）。down 时记下决定，up 按记录执行；
 // 无键码的键（AI 键/扩展键位，无原功能可言）发送失败不记状态。
-// 麦克风触发键的 down 透传延迟：先开麦让音频流（键盘→虚拟声卡）建立，
-// 输入法再收到 F10 开始录音，否则录到开头一段静音。
-// 快速点按（延迟未到就松开）则立即补发 down+up，保持点击语义不丢。
-const PT_MIC_DELAY = 600; // 音频链（固件开麦→PCM→桥接→虚拟声卡）建立需数百 ms，
-                          // 太短则输入法开始录音时还没声音（检测不到麦克风）
-const ptPending = new Map(); // keyId -> timer（延迟中的透传 down）
+// 麦克风触发键的 down 透传等音频流真正建立（事件驱动）：
+//   固件开麦→PCM 推流耗时随蓝牙状态浮动（实测数百 ms 且方差大），固定延迟
+//   既可能不够（输入法录到开头静音=「检测不到麦克风」）也可能太长。
+//   现在：开麦命令发出后，等第一包音频帧到达（再留 200ms 给 renderer 桥消费），
+//   或 PT_MIC_TIMEOUT 超时兜底；流本就活跃则立即透传。会话离线（命令没发出）
+//   时不等待，立即透传，保持点击语义。
+// 快速点按（流未到就松开）则立即补发 down+up，语义不丢。
+const PT_MIC_TIMEOUT = 1500;  // ms：等音频流建立的兜底上限（超时保 F10 语义）
+const PT_MIC_SETTLE = 200;    // ms：首帧到达后给 renderer 桥开始消费的余量
+const ptMicWait = new Map();  // keyId -> { timer }（等待音频流建立的透传 down）
+let ptMicSettleTimer = null;  // 首帧到达后的统一 flush 定时器
+
+function currentPassFlags() {
+  return process.platform === 'darwin' ? kbdInject.currentModFlags() : 0;
+}
 
 function doPassDown(keyId, flags, pass) {
   ptDecision.set(keyId, false);
@@ -217,24 +265,47 @@ function doPassUp(keyId, flags) {
   ptDecision.delete(keyId);
 }
 
-function passthroughKey(keyId, phase, pass) {
-  const flags = process.platform === 'darwin' ? kbdInject.currentModFlags() : 0;
+function flushMicPassthrough() {
+  // 音频帧已到：所有等待中的 mic 透传 down 再留一个消费余量后统一发出
+  if (!ptMicWait.size || ptMicSettleTimer) return;
+  ptMicSettleTimer = setTimeout(() => {
+    ptMicSettleTimer = null;
+    const flags = currentPassFlags();
+    for (const [keyId, w] of ptMicWait) {
+      clearTimeout(w.timer);
+      ptMicWait.delete(keyId);
+      doPassDown(keyId, flags, true);
+    }
+  }, PT_MIC_SETTLE);
+}
+
+function cancelMicWait(keyId) {
+  const w = ptMicWait.get(keyId);
+  if (w) { clearTimeout(w.timer); ptMicWait.delete(keyId); }
+}
+
+function passthroughKey(keyId, phase, pass, micAsked) {
+  const flags = currentPassFlags();
   if (phase === 'down') {
-    if (pass && (cfg.settings.micTriggerKeys || []).includes(keyId)) {
+    if (pass && micAsked) {
+      // 开麦键：等音频流建立再透传（流已活跃=虚拟声卡已在出声 → 立即透传）
+      const audioLive = session && session.lastAudioTs && Date.now() - session.lastAudioTs < 300;
+      if (audioLive) { doPassDown(keyId, flags, pass); return; }
       const t = setTimeout(() => {
-        ptPending.delete(keyId);
-        doPassDown(keyId, process.platform === 'darwin' ? kbdInject.currentModFlags() : 0, true);
-      }, PT_MIC_DELAY);
-      ptPending.set(keyId, t);
+        // 超时兜底：流始终没来（固件没开麦/丢包），保 F10 语义照常透传
+        const w = ptMicWait.get(keyId);
+        if (w && w.timer === t) ptMicWait.delete(keyId);
+        if (ptMicSettleTimer) { /* settle flush 不会再带上这个键（已删） */ }
+        doPassDown(keyId, currentPassFlags(), true);
+      }, PT_MIC_TIMEOUT);
+      ptMicWait.set(keyId, { timer: t });
       return;
     }
     doPassDown(keyId, flags, pass);
   } else {
-    const t = ptPending.get(keyId);
-    if (t !== undefined) { // down 延迟未触发就松开：立即补发 down+up
-      clearTimeout(t);
-      ptPending.delete(keyId);
-      doPassDown(keyId, flags, true); // 能进延迟队列的必是透传键
+    if (ptMicWait.has(keyId)) { // 流未到就松开：立即补发 down+up，保持点击语义
+      cancelMicWait(keyId);
+      doPassDown(keyId, flags, true); // 能进等待队列的必是透传键
       doPassUp(keyId, flags);
       return;
     }
@@ -242,10 +313,11 @@ function passthroughKey(keyId, phase, pass) {
   }
 }
 
-// 断线/停止兜底：清延迟队列，把透传已按下的键全部抬起，避免系统键状态卡住
+// 断线/停止兜底：清等待队列，把透传已按下的键全部抬起，避免系统键状态卡住
 function releasePassthrough() {
-  for (const t of ptPending.values()) clearTimeout(t);
-  ptPending.clear();
+  for (const [, w] of ptMicWait) clearTimeout(w.timer);
+  ptMicWait.clear();
+  if (ptMicSettleTimer) { clearTimeout(ptMicSettleTimer); ptMicSettleTimer = null; }
   for (const [keyId, injected] of ptDecision) {
     if (injected) actions.postRawKey(keyId, false, 0);
   }
@@ -327,6 +399,10 @@ function showWindow() {
       preload: path.join(__dirname, '..', 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      // 窗口隐藏到托盘是常态：禁用后台节流，保证 renderer 音频桥/IPC 投递
+      // 不被 Chromium 的 hidden-page 定时器对齐拖慢（实验实测 Electron 33 下
+      // AudioContext 不受影响，此为低成本保险）
+      backgroundThrottling: false,
     },
   });
   win.setMenuBarVisibility(false);
@@ -417,7 +493,8 @@ ipcMain.handle('pick-program', async () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  stopPsBlocker();
   if (watcher) watcher.stop();
-  if (session) session.stop();
+  if (session) session.stop(); // 推流中途退出会先补发 cmd=4 停麦再关句柄
   if (stats) stats.stop(); // 统计落盘
 });
