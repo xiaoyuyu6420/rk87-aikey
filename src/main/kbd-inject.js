@@ -17,6 +17,7 @@ function ensureCG() {
       sourceCreate: lib.func('void *CGEventSourceCreate(uint32_t)'),
       createKey: lib.func('void *CGEventCreateKeyboardEvent(void *, uint16_t, bool)'),
       setFlags: lib.func('void CGEventSetFlags(void *, uint64_t)'),
+      setIntegerField: lib.func('void CGEventSetIntegerValueField(void *, uint32_t, int64_t)'),
       post: lib.func('void CGEventPost(uint32_t, void *)'),
       release: lib.func('void CFRelease(void *)'),
     };
@@ -61,7 +62,44 @@ const MOD_BITS = [
 const state = {
   mod: 0,      // 上次报文的修饰键掩码
   keys: new Set(), // 上次按下的普通键（HID usage）
+  downTs: new Map(), // usage -> 按下时刻（按住重复用）
+  lastRep: new Map(), // usage -> 上次重复发送时刻
 };
+
+// ---------- 按住重复（autorepeat） ----------
+// macOS 对 CGEvent 合成键盘事件不做自动重复：物理按住字母/backspace 只回注一个
+// down，系统不会像原生键盘那样连发 → 长按不重复、backspace 不能连续删。
+// 这里自己模拟：按住超过 REPEAT_DELAY 后每 REPEAT_INTERVAL 补发一个带
+// autorepeat 标志的 keyDown（kCGKeyboardEventAutorepeat = 8）。
+const REPEAT_DELAY = 400;  // 初始延迟（对齐 mac 默认手感）
+const REPEAT_INTERVAL = 80; // 重复间隔
+let repeatTimer = null;
+
+function ensureRepeatTimer() {
+  if (repeatTimer || !IS_MAC) return;
+  repeatTimer = setInterval(() => {
+    if (!CG || state.keys.size === 0) return;
+    const now = Date.now();
+    const flags = currentFlags(state.mod);
+    for (const k of state.keys) {
+      if (FNKEY_USAGE[k]) continue; // 功能键有拦截/透传配对逻辑，不参与重复
+      const ts = state.downTs.get(k);
+      if (ts === undefined || now - ts < REPEAT_DELAY) continue;
+      const last = state.lastRep.get(k) || ts + REPEAT_DELAY - REPEAT_INTERVAL;
+      if (now - last < REPEAT_INTERVAL) continue;
+      state.lastRep.set(k, now);
+      const vk = HID2VK[k];
+      if (vk === undefined) continue;
+      try {
+        const ev = CG.createKey(CG.source, vk, true);
+        CG.setFlags(ev, flags);
+        if (CG.setIntegerField) CG.setIntegerField(ev, 8, 1);
+        CG.post(0, ev);
+        CG.release(ev);
+      } catch (_) {}
+    }
+  }, 25);
+}
 
 // ---------- 功能键拦截（非 AI 模式） ----------
 // F1-F12/PrtSc 在标准报文（reportId=2）里的 HID usage -> keyId。
@@ -125,6 +163,7 @@ function feedKeyboardReport(data) {
   if (!IS_MAC) return;
   ensureCG();
   if (!CG) return;
+  ensureRepeatTimer();
 
   const mod = data[1] || 0;
   const keys = new Set();
@@ -145,6 +184,8 @@ function feedKeyboardReport(data) {
       if (vk !== undefined) postKey(vk, false, 0); // 含被屏蔽键：孤立抬起无害，保系统状态干净
     }
     state.keys.clear();
+    state.downTs.clear();
+    state.lastRep.clear();
     fnKeyInjected.clear();
   }
 
@@ -166,6 +207,8 @@ function feedKeyboardReport(data) {
   // 抬起（先于按下，避免同帧互换时序问题）
   for (const k of state.keys) {
     if (!keys.has(k)) {
+      state.downTs.delete(k);
+      state.lastRep.delete(k);
       if (!dispatchFnKey(k, false, flags)) {
         const vk = HID2VK[k];
         if (vk !== undefined) postKey(vk, false, flags);
@@ -175,6 +218,8 @@ function feedKeyboardReport(data) {
   // 按下
   for (const k of keys) {
     if (!state.keys.has(k)) {
+      state.downTs.set(k, Date.now());
+      state.lastRep.delete(k);
       if (!dispatchFnKey(k, true, flags)) {
         const vk = HID2VK[k];
         if (vk !== undefined) postKey(vk, true, flags);
@@ -202,6 +247,8 @@ function reset() {
   }
   state.mod = 0;
   state.keys = new Set();
+  state.downTs.clear();
+  state.lastRep.clear();
   state.unknownWarned = new Set();
   fnKeyInjected.clear();
 }
