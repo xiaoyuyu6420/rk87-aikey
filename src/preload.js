@@ -18,6 +18,9 @@ contextBridge.exposeInMainWorld('aikey', {
   // 配置档（多套键位 + 前台应用自动切档）
   profileOp: payload => ipcRenderer.invoke('profile-op', payload),
   onProfileChanged: cb => ipcRenderer.on('profile-changed', (_e, data) => cb(data)),
+  // 宏录制
+  macroOp: payload => ipcRenderer.invoke('macro-op', payload),
+  onMacroRecorded: cb => ipcRenderer.on('macro-recorded', (_e, data) => cb(data)),
   // 打字统计
   statsGet: () => ipcRenderer.invoke('stats-get'),
 });

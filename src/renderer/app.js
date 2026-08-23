@@ -5,10 +5,13 @@ const TYPES = [
   { value: 'app',     label: '启动程序' },
   { value: 'url',     label: '打开网址' },
   { value: 'hotkey',  label: '发送快捷键' },
+  { value: 'macro',   label: '宏（录制按键）' },
+  { value: 'sys',     label: '系统：循环切档' },
 ];
 
 let state = null; // { keys, bindings, bindingsAi, settings, deviceConnected }
 let currentMode = 'fn'; // 'fn' 普通模式 | 'ai' AI 模式（两套绑定独立配置）
+let macroRecordingRow = null; // 正在录制宏的键行（超时自动停时回填）
 
 init();
 
@@ -38,6 +41,18 @@ async function init() {
 
   initMicBridge();
   initStats();
+
+  // 宏 30s 超时自动停 → 回填正在录制的行
+  window.aikey.onMacroRecorded(data => {
+    const row = macroRecordingRow;
+    macroRecordingRow = null;
+    if (!row || !row.isConnected) return;
+    row._recording = false;
+    row._macroSteps = data.steps || [];
+    if (row._rerenderFields) row._rerenderFields();
+    toast(`录制超时自动停止，已录 ${(data.steps || []).length} 步`);
+  });
+
   window.aikey.onKeyEvent(ev => {
     if (ev.phase !== 'down') return;
     const row = document.querySelector(`.key-row[data-id="${ev.keyId}"]`);
@@ -46,6 +61,8 @@ async function init() {
     row.classList.add('flash');
     setTimeout(() => row.classList.remove('flash'), 600);
   });
+
+  console.log('[ui] init complete', state.profiles ? `档位 x${state.profiles.order.length}` : '');
 }
 
 // ---------- 顶层页面切换（按键映射 / 打字统计） ----------
@@ -363,6 +380,87 @@ function buildRow(key, binding) {
       attachCapture(cap, combo);
       fields.appendChild(cap);
     }
+    if (t === 'macro') {
+      row._macroSteps = row._macroSteps || binding.steps || [];
+      const box = document.createElement('div');
+      box.className = 'macro-box';
+      // 步骤预览（键名 + 与上步间隔）
+      const list = document.createElement('div');
+      list.className = 'macro-steps';
+      const steps = row._macroSteps || [];
+      if (steps.length) {
+        const show = steps.slice(0, 14);
+        for (const s of show) {
+          const item = document.createElement('span');
+          item.className = 'macro-step';
+          item.textContent = `${s.down ? '↓' : '↑'}${keyLabel(s.name)}${s.dt > 60 ? ` +${Math.round(s.dt)}ms` : ''}`;
+          list.appendChild(item);
+        }
+        if (steps.length > show.length) {
+          const more = document.createElement('span');
+          more.className = 'macro-step more';
+          more.textContent = `…共 ${steps.length} 步`;
+          list.appendChild(more);
+        }
+      } else {
+        const empty = document.createElement('span');
+        empty.className = 'none-hint';
+        empty.textContent = '未录制';
+        list.appendChild(empty);
+      }
+      box.appendChild(list);
+      // 控制按钮
+      const ctrl = document.createElement('div');
+      ctrl.className = 'macro-ctrl';
+      const recBtn = document.createElement('button');
+      recBtn.className = 'fixed';
+      recBtn.onclick = async () => {
+        if (!row._recording) {
+          const r = await window.aikey.macroOp({ op: 'start' });
+          if (!r.ok) { toast(r.error, true); return; }
+          row._recording = true;
+          macroRecordingRow = row;
+          toast('录制中… 直接按键（最长 30 秒，再点「停止」结束）');
+        } else {
+          const r = await window.aikey.macroOp({ op: 'stop' });
+          row._recording = false;
+          macroRecordingRow = null;
+          if (r.ok) {
+            row._macroSteps = r.steps || [];
+            toast(`已录 ${row._macroSteps.length} 步，记得点「保存」`);
+          } else toast(r.error, true);
+          renderFields();
+          return;
+        }
+        recBtn.textContent = '■ 停止';
+        recBtn.classList.add('recording');
+      };
+      recBtn.textContent = row._recording ? '■ 停止' : '● 录制';
+      recBtn.classList.toggle('recording', !!row._recording);
+      const playBtn = document.createElement('button');
+      playBtn.textContent = '▶ 试听';
+      playBtn.onclick = async () => {
+        if (!row._macroSteps || !row._macroSteps.length) { toast('宏为空，先录制', true); return; }
+        const r = await window.aikey.testAction({ type: 'macro', steps: row._macroSteps });
+        if (r && r.ok === false) toast(r.error, true);
+      };
+      const clearBtn = document.createElement('button');
+      clearBtn.textContent = '清除';
+      clearBtn.onclick = () => { row._macroSteps = []; renderFields(); };
+      ctrl.append(recBtn, playBtn, clearBtn);
+      box.appendChild(ctrl);
+      const hint = document.createElement('div');
+      hint.className = 'none-hint';
+      hint.textContent = '录制期间键盘绑定动作暂停执行、原按键照常透传（可在目标输入框实时看到）；只录标准系统键，AI 扩展键位不进录制。';
+      box.appendChild(hint);
+      fields.appendChild(box);
+    }
+    if (t === 'sys') {
+      const span = document.createElement('span');
+      span.className = 'none-hint';
+      span.textContent = '按下此键在全部键位档之间循环切换';
+      fields.appendChild(span);
+    }
     // 透传开关：仅对有「原按键功能」的键（F1-F12/PrtSc）显示；AI 键/扩展键位无原功能
     if (/^(f\d{1,2}|prtsc)$/.test(key.id)) {
       const pass = document.createElement('label');
@@ -394,6 +492,8 @@ function buildRow(key, binding) {
     const action = { type: t };
     if (t === 'app' || t === 'url') action.target = input.value.trim();
     if (t === 'hotkey') action.combo = input.value.trim();
+    if (t === 'macro') action.steps = row._macroSteps || [];
+    if (t === 'sys') action.op = 'profile-cycle';
     if (t === 'app' || t === 'url') {
       const nums = fields.querySelectorAll('input[type=number]');
       const texts = fields.querySelectorAll('label.after-line input[type=text]');
@@ -406,6 +506,7 @@ function buildRow(key, binding) {
   }
 
   row.collect = collect;
+  row._rerenderFields = renderFields; // 宏超时自动停时从外部重渲染本行
   row.append(name, typeSel, fields, actions);
   return row;
 }
@@ -692,6 +793,7 @@ const KEY_LABELS = {
   home: 'Home', end: 'End', pgup: 'PgUp', pgdn: 'PgDn', delete: 'Del', insert: 'Ins',
   minus: '-', equal: '=', comma: ',', period: '.', slash: '/', backtick: '`',
   lbracket: '[', rbracket: ']', backslash: '\\', semicolon: ';', quote: "'",
+  ctrl: 'Ctrl', shift: 'Shift', alt: 'Alt', win: 'Win', fn: 'Fn',
 };
 function keyLabel(name) {
   if (KEY_LABELS[name]) return KEY_LABELS[name];

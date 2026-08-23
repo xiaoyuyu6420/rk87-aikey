@@ -11,6 +11,7 @@ const { lookupKey, allKeys } = require('./keymap');
 const { MicPipeline } = require('./mic');
 const { TypingStats } = require('./stats');
 const { FgWatcher } = require('./fgwatch');
+const { MacroRecorder, replayMacro, abortReplay, trimSteps, RECORD_MAX_MS } = require('./macro');
 const actions = require('./actions');
 const kbdInject = require('./kbd-inject');
 const config = require('./config');
@@ -32,6 +33,8 @@ let audioDedup = [];       // 双连接（USB+蓝牙）重复音频帧去重（�
 let lowBatNotified = false; // 低电量一次性提醒（充电/回血后重新武装）
 let fg = null;              // 前台应用检测（配置档自动切档事件源，规则空时零开销）
 let manualAtProc = null;    // 手动切档时的前台进程名（null=无 override，自动规则可接管）
+let macroRec = null;        // 宏录制器（仅录制期间存在 5ms 轮询）
+let macroArmed = false;     // 录制期间：抑制绑定动作/开麦联动，绑定键强制透传（键状态可见才能录到）
 
 // 常驻托盘应用：瞬时异常（如 stdout 管道断开的 EPIPE）不崩溃退出
 process.on('uncaughtException', e => {
@@ -176,6 +179,7 @@ function boot() {
       setImmediate(() => onAiMode(false));
     }
     const binding = (cfg.bindings && cfg.bindings[keyId]) || { type: 'none' };
+    if (macroArmed) return null; // 宏录制中：不拦截不执行，走原生回注（键状态系统层可见）
     if (binding.type === 'none') return null;
     console.log(`[key] ${keyId} down（标准报文，已拦截）`);
     if (win && !win.isDestroyed()) win.webContents.send('key-event', { keyId, phase: 'down' });
@@ -197,6 +201,10 @@ function boot() {
     if (op === 'profile-cycle') { cycleProfile(); return { ok: true }; }
     return { ok: false, error: `未知系统动作 ${op}` };
   });
+  // 宏回放执行体（发键复用透传同款底层，与「发送快捷键」一致）
+  actions.setMacroRunner(steps => replayMacro(steps, (name, down) => actions.postRawKey(name, down, 0))
+    ? { ok: true }
+    : { ok: false, error: '回放进行中或宏为空' });
 
   // 前台应用检测 → 配置档自动切档（appRules 为空时不启动，零开销）
   fg = new FgWatcher();
@@ -301,24 +309,26 @@ function onKey({ code, keyId, phase }) {
     win.webContents.send('key-event', { code, keyId: def.id, label: def.label, phase });
   }
   // 开麦键联动：按住 = 主动开麦，松开 = 关麦（键可在设置里勾选，默认 F10 + AI 键；空 = 全关）
+  //（宏录制期间抑制：录宏不应触发语音推流）
   let micAsked = false; // 开麦命令是否真正发出（离线时 false → 透传不等流）
   const micKeys = cfg.settings.micTriggerKeys || [];
-  if (micKeys.includes(keyId) && session) {
+  if (!macroArmed && micKeys.includes(keyId) && session) {
     if (phase === 'down') micAsked = session.askVoice();
     else session.stopVoice();
   }
   // cmd=159 厂商码只在 AI 模式上报 → 此路径一律用 AI 模式绑定集
   const binding = (cfg.bindingsAi && cfg.bindingsAi[keyId]) || { type: 'none' };
-  // 动作只在按下触发
-  if (phase === 'down' && binding.type !== 'none') {
+  // 动作只在按下触发（宏录制期间抑制动作执行）
+  if (phase === 'down' && binding.type !== 'none' && !macroArmed) {
     const result = actions.run(binding);
     if (result && result.ok === false) {
       console.log(`[action] ${keyId} 失败:`, result.error);
     }
   }
-  // 透传：未绑定任何动作（完全原生）或勾了透传 → 回注标准按键
-  //（AI 模式下 F 键走厂商码不经系统，透传让输入法语音/亮度等原功能照常生效）
-  passthroughKey(keyId, phase, binding.passthrough === true || binding.type === 'none', micAsked);
+  // 透传：未绑定任何动作（完全原生）、勾了透传、或宏录制中（强制——AI 模式厂商码
+  // 路径的系统键状态由本应用回注合成，不透传则 GetAsyncKeyState 看不到，录不进宏）
+  //（回注让用户在目标窗口看到真实输入反馈，一举两得）
+  passthroughKey(keyId, phase, macroArmed || binding.passthrough === true || binding.type === 'none', micAsked);
 }
 
 // 透传回注（AI 模式厂商码路径）。down 时记下决定，up 按记录执行；
@@ -588,6 +598,33 @@ ipcMain.handle('mic-control', (_e, on) => {
   return { ok, online: sessionOnline };
 });
 
+// 宏录制：start/stop（30s 超时主进程自动停并推送结果）
+ipcMain.handle('macro-op', (_e, payload) => {
+  const { op } = payload || {};
+  if (op === 'start') {
+    if (!macroRec) macroRec = new MacroRecorder();
+    const okStart = macroRec.start((steps, reason) => {
+      macroArmed = false; // 超时自动停同样要解除抑制
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('macro-recorded', { steps: trimSteps(steps), reason });
+      }
+    });
+    if (!okStart) return { ok: false, error: '当前平台不支持宏录制' };
+    macroArmed = true;
+    abortReplay(); // 录制优先：掐掉进行中的回放，防止回放键混进录制
+    console.log('[macro] 开始录制（30s 上限，绑定动作暂停）');
+    return { ok: true, maxMs: RECORD_MAX_MS };
+  }
+  if (op === 'stop') {
+    if (!macroRec || !macroRec.recording) return { ok: false, error: '当前未在录制' };
+    const steps = macroRec.stop('manual');
+    macroArmed = false;
+    console.log(`[macro] 结束录制，${steps.length} 步`);
+    return { ok: true, steps: trimSteps(steps) };
+  }
+  return { ok: false, error: `未知操作 ${op}` };
+});
+
 ipcMain.handle('test-action', (_e, action) => actions.run(action));
 
 // 配置档操作：add / rename / del / set-active / set-rules
@@ -651,4 +688,5 @@ app.on('before-quit', () => {
   if (session) session.stop(); // 推流中途退出会先补发 cmd=4 停麦再关句柄
   if (stats) stats.stop(); // 统计落盘
   if (fg) fg.stop();
+  abortReplay(); // 掐掉宏回放孤儿 timer
 });

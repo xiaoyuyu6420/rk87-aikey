@@ -169,8 +169,11 @@ function postRawKey(name, down, flags) {
 //   { type:'url',    target:'https://...', afterHotkey?, afterDelay? }
 //   { type:'hotkey', combo:'Ctrl+Shift+S' }
 //   { type:'sys',    op:'profile-cycle' }  // 系统动作（主进程注入执行体）
+//   { type:'macro',  steps:[{ name, down, dt }] }  // 宏（录制于设置页，回放注入执行体）
 let sysHandler = null;
 function setSysHandler(fn) { sysHandler = fn; }
+let macroRunner = null;
+function setMacroRunner(fn) { macroRunner = fn; }
 
 function run(action) {
   if (!action || !action.type || action.type === 'none') return { ok: true, skipped: true };
@@ -197,6 +200,9 @@ function run(action) {
     case 'sys':
       if (sysHandler) return sysHandler(action.op || '');
       return { ok: false, error: '系统动作未初始化' };
+    case 'macro':
+      if (macroRunner) return macroRunner(Array.isArray(action.steps) ? action.steps : []);
+      return { ok: false, error: '宏执行器未初始化' };
     default:
       return { ok: false, error: `未知动作类型 ${action.type}` };
   }
@@ -210,4 +216,4 @@ function scheduleAfter(action) {
 }
 
 // VK_KEYNAMES：按平台选好的「键名→键码」表（打字统计用它构建反向轮询表）
-module.exports = { run, sendHotkey, postRawKey, vkOf, setSysHandler, VK_KEYNAMES: VK };
+module.exports = { run, sendHotkey, postRawKey, vkOf, setSysHandler, setMacroRunner, VK_KEYNAMES: VK };

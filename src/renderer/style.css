@@ -230,3 +230,15 @@ button.capturing {
 .rule-row { display: flex; gap: 8px; margin: 4px 0; align-items: center; }
 .rule-row .rule-name { flex: 1; }
 .rule-row .rule-profile { flex: 0 0 auto; min-width: 100px; }
+
+/* ---------- 宏录制 ---------- */
+.macro-box { flex-basis: 100%; display: flex; flex-direction: column; gap: 6px; }
+.macro-steps { display: flex; flex-wrap: wrap; gap: 4px; }
+.macro-step {
+  font-size: 11px; background: var(--bg); border: 1px solid var(--line);
+  border-radius: 4px; padding: 2px 6px; color: var(--text);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.macro-step.more { color: var(--muted); border-style: dashed; }
+.macro-ctrl { display: flex; gap: 6px; }
+button.recording { color: #ff6b6b !important; border-color: #ff6b6b !important; }
