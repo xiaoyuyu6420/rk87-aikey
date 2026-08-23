@@ -188,23 +188,18 @@ class KeySession extends EventEmitter {
       this.hbMiss = 0;
       // 心跳 RTT：链路质量信号。蓝牙劣化（如语音后连接参数未恢复）时打字报文
       // 延迟抖动/丢失（漏字、顺序错乱、手感发黏），但心跳仍在回应、假在线检测
-      // 抓不到——用 RTT 连续超标判定劣化，主动重连恢复链路。
-      // 语音推流期间 RTT 天然升高（音频占带宽），不采样不判定，否则会把
-      // 正在进行的语音误判成劣化并重连掐断
+      // 抓不到——用 RTT 连续超标判定劣化，主动重连恢复链路
       if (this._hbTs) {
         const rtt = Date.now() - this._hbTs;
         this._hbTs = 0;
-        const audioActive = this.lastAudioTs && Date.now() - this.lastAudioTs < 2000;
-        if (!audioActive) {
-          this.rttAvg = this.rttAvg ? this.rttAvg * 0.6 + rtt * 0.4 : rtt;
-          if (this.rttAvg > 250 && ++this.rttBad >= 5) {
-            console.log(`[session] 链路劣化（心跳 RTT 平均 ${Math.round(this.rttAvg)}ms），强制重连`);
-            this.rttBad = 0;
-            this._onDisconnect('link-degraded');
-            return;
-          }
-          if (this.rttAvg <= 250) this.rttBad = 0;
+        this.rttAvg = this.rttAvg ? this.rttAvg * 0.6 + rtt * 0.4 : rtt;
+        if (this.rttAvg > 250 && ++this.rttBad >= 5) {
+          console.log(`[session] 链路劣化（心跳 RTT 平均 ${Math.round(this.rttAvg)}ms），强制重连`);
+          this.rttBad = 0;
+          this._onDisconnect('link-degraded');
+          return;
         }
+        if (this.rttAvg <= 250) this.rttBad = 0;
       }
       if (!this.got104) {
         this.got104 = true;
@@ -289,19 +284,16 @@ class KeySession extends EventEmitter {
 
   // 抬起看护：蓝牙劣化时 cmd=159 的抬起码会卡在缓冲/丢失——透传的 keyUp 发不出
   // （输入法语音关不掉），且 pressed 残留导致下一次按下的 down 被边沿去重吞掉
-  // （长按唤不起，直到打字把缓冲冲开才恢复）。
-  // 用音频流当"还按着"的证据：流在推 = 物理仍按住（长按语音多久都不误放，仅
-  // 30s 异常兜底）；流已停但按键仍挂着 = 抬起已丢失（松开后固件即停推），5s
-  // 即释放，强制补发 up 走完整链路（透传 keyUp + mic 联动关麦）。
+  // （长按唤不起，直到打字把缓冲冲开才恢复）。按下 >15s 仍无抬起视为丢失，
+  // 强制补发 up 事件走完整释放链路（透传 keyUp + mic 联动关麦）。
+  // 副作用：真按住超过 15s 会被误判松开（语音中断），微信语音单句很少超此限。
   _keyUpWatchdog() {
     if (this.pressedTs.size === 0) return;
     const now = Date.now();
-    const audioActive = this.lastAudioTs && now - this.lastAudioTs < 2000;
-    const limit = audioActive ? 30000 : 5000;
     for (const [id, ts] of this.pressedTs) {
-      if (now - ts < limit) continue;
+      if (now - ts < 15000) continue;
       const def = KEY_DEFS.find(d => d.id === id);
-      console.log(`[session] ${id} 抬起报文丢失（按住 ${Math.round((now - ts) / 1000)}s，流${audioActive ? '在推' : '已停'}），watchdog 强制释放`);
+      console.log(`[session] ${id} 抬起报文丢失（>15s），watchdog 强制释放`);
       this.pressed.delete(id);
       this.pressedTs.delete(id);
       if (def) this.emit('key', { code: def.up, keyId: id, phase: 'up' });
@@ -358,11 +350,7 @@ class KeySession extends EventEmitter {
       this.dev.write(frame(cmd, data, this.channel));
       // 心跳发出去后要求下个周期前有 104 回应；连续 3 次丢失 = 假在线，主动断开重连
       if (cmd === 5 && this.connected) {
-        // 语音推流期间心跳回应被音频流挤延迟是常态，不累计丢失
-        //（否则正在说话时被误判假在线→重连→语音被掐断）
-        const audioActive = this.lastAudioTs && Date.now() - this.lastAudioTs < 2000;
-        if (audioActive) this.hbMiss = 0;
-        else if (this.pendingHb && ++this.hbMiss >= 3) {
+        if (this.pendingHb && ++this.hbMiss >= 3) {
           this._onDisconnect('heartbeat-lost(3s无104)');
           return;
         }
