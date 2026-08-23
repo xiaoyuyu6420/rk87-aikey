@@ -175,20 +175,51 @@ function onKey({ code, keyId, phase }) {
 }
 
 // 透传回注（AI 模式厂商码路径）。down 时记下决定，up 按记录执行；
-// 无键码的键（AI 键/扩展键位，无原功能可言）发送失败不记状态
+// 无键码的键（AI 键/扩展键位，无原功能可言）发送失败不记状态。
+// 麦克风触发键的 down 透传延迟：先开麦让音频流（键盘→虚拟声卡）建立，
+// 输入法再收到 F10 开始录音，否则录到开头一段静音。
+// 快速点按（延迟未到就松开）则立即补发 down+up，保持点击语义不丢。
+const PT_MIC_DELAY = 250;
+const ptPending = new Map(); // keyId -> timer（延迟中的透传 down）
+
+function doPassDown(keyId, flags, pass) {
+  ptDecision.set(keyId, false);
+  if (pass && actions.postRawKey(keyId, true, flags)) ptDecision.set(keyId, true);
+}
+function doPassUp(keyId, flags) {
+  if (ptDecision.get(keyId)) actions.postRawKey(keyId, false, flags);
+  ptDecision.delete(keyId);
+}
+
 function passthroughKey(keyId, phase, pass) {
   const flags = process.platform === 'darwin' ? kbdInject.currentModFlags() : 0;
   if (phase === 'down') {
-    ptDecision.set(keyId, false);
-    if (pass && actions.postRawKey(keyId, true, flags)) ptDecision.set(keyId, true);
-  } else if (ptDecision.has(keyId)) {
-    if (ptDecision.get(keyId)) actions.postRawKey(keyId, false, flags);
-    ptDecision.delete(keyId);
+    if (pass && (cfg.settings.micTriggerKeys || []).includes(keyId)) {
+      const t = setTimeout(() => {
+        ptPending.delete(keyId);
+        doPassDown(keyId, process.platform === 'darwin' ? kbdInject.currentModFlags() : 0, true);
+      }, PT_MIC_DELAY);
+      ptPending.set(keyId, t);
+      return;
+    }
+    doPassDown(keyId, flags, pass);
+  } else {
+    const t = ptPending.get(keyId);
+    if (t !== undefined) { // down 延迟未触发就松开：立即补发 down+up
+      clearTimeout(t);
+      ptPending.delete(keyId);
+      doPassDown(keyId, flags, true); // 能进延迟队列的必是透传键
+      doPassUp(keyId, flags);
+      return;
+    }
+    if (ptDecision.has(keyId)) doPassUp(keyId, flags);
   }
 }
 
-// 断线/停止兜底：把透传已按下的键全部抬起，避免系统键状态卡住
+// 断线/停止兜底：清延迟队列，把透传已按下的键全部抬起，避免系统键状态卡住
 function releasePassthrough() {
+  for (const t of ptPending.values()) clearTimeout(t);
+  ptPending.clear();
   for (const [keyId, injected] of ptDecision) {
     if (injected) actions.postRawKey(keyId, false, 0);
   }
@@ -240,6 +271,7 @@ function rebuildTrayMenu() {
     { type: 'separator' },
     { label: (deviceConnected || sessionOnline) ? '键盘：已连接' : '键盘：未连接', enabled: false },
     { label: sessionOnline ? `麦克风会话：在线${session && session.transport ? '（' + session.transport + '）' : ''}` : '麦克风会话：离线', enabled: false },
+    { label: '重连键盘', click: () => { if (session) session.reconnect(); } },
     { label: '退出官方 RK-AI', click: () => { exitOfficialRKAI(); } },
     { label: '开机自启', type: 'checkbox', checked: !!(cfg.settings && cfg.settings.autostart), click: mi => {
       cfg.settings.autostart = mi.checked;
