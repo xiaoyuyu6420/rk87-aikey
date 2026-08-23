@@ -860,6 +860,14 @@ function initStats() {
     await window.aikey.setSettings({ statsEnabled: opt.checked });
     refreshStats();
   };
+  // 每日打字报告：canvas 绘制分享卡片 → 保存 PNG
+  document.getElementById('stats-report').onclick = async () => {
+    let s;
+    try { s = await window.aikey.statsGet(); } catch (_) {}
+    if (!s || s.supported === false) { toast('当前平台不支持统计', true); return; }
+    const r = await window.aikey.saveReportPng(drawReport(s).toDataURL('image/png'));
+    if (r && r.ok) toast('报告已保存');
+  };
   // 疲劳提醒（连续打字满阈值弹系统通知）
   const optFat = document.getElementById('opt-fatigue');
   const fatMin = document.getElementById('fatigue-min');
@@ -927,7 +935,7 @@ async function refreshStats() {
     topBox.appendChild(empty);
   }
 
-  // 今日键位热力图（QWERTY 简化网格）
+// 今日键位热力图（QWERTY 简化网格）
   renderHeatmap(s.today.keys || {});
 
   // 轴体寿命（累计 ÷ 单键 5000 万次额定寿命，趣味估算）
@@ -955,6 +963,106 @@ async function refreshStats() {
     col.append(slot, label);
     weekBox.appendChild(col);
   }
+}
+
+// ---------- 每日打字报告：canvas 分享卡片 ----------
+// 今日/本周/本月总数 + Top3 键 + 7 天柱图 + 轴体寿命 + 日期落款（纯按需生成）
+function drawReport(s) {
+  const W = 800, H = 1000, X = 56;
+  const cv = document.createElement('canvas');
+  cv.width = W; cv.height = H;
+  const g = cv.getContext('2d');
+  g.fillStyle = '#0f1115'; g.fillRect(0, 0, W, H);
+  g.beginPath(); g.roundRect(24, 24, W - 48, H - 48, 20);
+  g.fillStyle = '#171a21'; g.fill();
+  let y = 100;
+
+  // 标题 + 落款日期
+  g.fillStyle = '#e8eaf0'; g.font = '600 32px system-ui, sans-serif';
+  g.fillText('RK87 AIKey · 打字报告', X, y);
+  const now = new Date();
+  g.fillStyle = '#8b93a3'; g.font = '15px system-ui, sans-serif';
+  g.fillText(`${now.getFullYear()} 年 ${now.getMonth() + 1} 月 ${now.getDate()} 日`, X, y + 30);
+  y += 86;
+
+  // 三大数字：今日 / 本周 / 本月
+  const sum = arr => (arr || []).reduce((a, d) => a + (d.total || 0), 0);
+  const bigs = [
+    ['今日', s.today.total || 0],
+    ['本周（近 7 天）', sum(s.week)],
+    ['本月（近 30 天）', sum(s.month)],
+  ];
+  const colW = (W - X * 2) / 3;
+  bigs.forEach(([label, val], i) => {
+    const cx = X + i * colW;
+    g.fillStyle = '#8b93a3'; g.font = '14px system-ui, sans-serif';
+    g.fillText(label, cx, y);
+    g.fillStyle = '#4f8cff'; g.font = '600 44px system-ui, sans-serif';
+    g.fillText(val.toLocaleString(), cx, y + 54);
+  });
+  y += 110;
+  g.strokeStyle = '#2a2f3a'; g.beginPath(); g.moveTo(X, y); g.lineTo(W - X, y); g.stroke();
+  y += 48;
+
+  // 今日 Top3 键
+  g.fillStyle = '#e8eaf0'; g.font = '600 20px system-ui, sans-serif';
+  g.fillText('今日最爱按', X, y);
+  y += 20;
+  const top3 = (s.today.topKeys || []).slice(0, 3);
+  if (top3.length) {
+    const max = top3[0].count;
+    top3.forEach((k, i) => {
+      const ry = y + 22 + i * 52;
+      g.fillStyle = '#8b93a3'; g.font = '15px system-ui, sans-serif';
+      g.fillText(keyLabel(k.name), X, ry + 16);
+      const barMax = W - X * 2 - 220;
+      g.fillStyle = '#2a2f3a'; g.beginPath(); g.roundRect(X + 90, ry, barMax, 22, 11); g.fill();
+      g.fillStyle = '#4f8cff'; g.beginPath();
+      g.roundRect(X + 90, ry, Math.max(22, barMax * k.count / max), 22, 11); g.fill();
+      g.fillStyle = '#e8eaf0'; g.font = '600 15px system-ui, sans-serif';
+      g.fillText(k.count.toLocaleString(), X + 90 + barMax + 16, ry + 16);
+    });
+    y += 22 + top3.length * 52;
+  } else {
+    g.fillStyle = '#8b93a3'; g.font = '14px system-ui, sans-serif';
+    g.fillText('今天还没有记录', X, y + 24);
+    y += 46;
+  }
+  y += 42;
+
+  // 近 7 天柱图
+  g.fillStyle = '#e8eaf0'; g.font = '600 20px system-ui, sans-serif';
+  g.fillText('近 7 天', X, y);
+  y += 20;
+  const wmax = Math.max(1, ...(s.week || []).map(d => d.total || 0));
+  const bw = (W - X * 2 - 6 * 14) / 7;
+  (s.week || []).forEach((d, i) => {
+    const bx = X + i * (bw + 14);
+    const bh = Math.round((d.total || 0) / wmax * 160);
+    g.fillStyle = '#2a2f3a'; g.beginPath(); g.roundRect(bx, y + 190 - 160, bw, 160, 6); g.fill();
+    if (bh > 0) {
+      g.fillStyle = i === 6 ? '#7ee0a3' : '#4f8cff';
+      g.beginPath(); g.roundRect(bx, y + 190 - bh, bw, bh, 6); g.fill();
+    }
+    g.fillStyle = '#8b93a3'; g.font = '12px system-ui, sans-serif';
+    g.fillText(d.date.slice(5), bx + bw / 2 - 16, y + 210);
+  });
+  y += 262;
+
+  // 轴体寿命（最辛劳键）
+  const life = s.lifetime || { total: 0, keys: {} };
+  const hardKey = Object.entries(life.keys || {}).sort((a, b) => b[1] - a[1])[0];
+  g.fillStyle = '#e8eaf0'; g.font = '600 20px system-ui, sans-serif';
+  g.fillText('轴体寿命', X, y);
+  g.fillStyle = '#8b93a3'; g.font = '14px system-ui, sans-serif';
+  g.fillText(hardKey ? `累计 ${life.total.toLocaleString()} 次 · 最辛劳的是 ${keyLabel(hardKey[0])}（${(hardKey[1] / 50e6 * 100).toFixed(3)}%）`
+                     : `累计 ${life.total.toLocaleString()} 次`, X, y + 28);
+  y += 76;
+
+  // 底部落款
+  g.fillStyle = '#555c6b'; g.font = '13px system-ui, sans-serif';
+  g.fillText('由 RK87 AIKey 本机生成 · 数据仅存本机（保留 90 天）', X, H - 60);
+  return cv;
 }
 
 // ---------- 今日键位热力图 ----------

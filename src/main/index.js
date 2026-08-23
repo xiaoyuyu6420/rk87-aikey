@@ -535,6 +535,27 @@ ipcMain.handle('pick-dir', async () => {
   return r.canceled ? null : r.filePaths[0];
 });
 
+// 每日打字报告：renderer 画好的 canvas PNG → 保存对话框落盘
+ipcMain.handle('save-report', async (_e, dataUrl) => {
+  if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/png;base64,')) {
+    return { ok: false, error: '无效的图片数据' };
+  }
+  const { dialog } = require('electron');
+  const now = new Date();
+  const p = n => String(n).padStart(2, '0');
+  const r = await dialog.showSaveDialog(win, {
+    defaultPath: `打字报告-${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}.png`,
+    filters: [{ name: 'PNG 图片', extensions: ['png'] }],
+  });
+  if (r.canceled || !r.filePath) return { ok: false, canceled: true };
+  try {
+    fs.writeFileSync(r.filePath, Buffer.from(dataUrl.split(',')[1], 'base64'));
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
 function createTray() {
   let img = null;
   if (process.platform === 'darwin') {

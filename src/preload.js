@@ -26,4 +26,5 @@ contextBridge.exposeInMainWorld('aikey', {
   onMacroRecorded: cb => ipcRenderer.on('macro-recorded', (_e, data) => cb(data)),
   // 打字统计
   statsGet: () => ipcRenderer.invoke('stats-get'),
+  saveReportPng: dataUrl => ipcRenderer.invoke('save-report', dataUrl),
 });
