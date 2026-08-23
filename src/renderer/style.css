@@ -33,6 +33,14 @@ h1 { font-size: 17px; margin: 0; }
 .header-settings label { cursor: pointer; }
 
 main { padding: 16px 20px 40px; }
+
+/* 顶层页面切换（按键映射 / 打字统计） */
+.page-nav { display: flex; gap: 16px; border-bottom: 1px solid #3a4050; margin-bottom: 14px; }
+.page-tab {
+  padding: 8px 4px; background: none; border: none; border-bottom: 2px solid transparent;
+  color: var(--muted); font-size: 14px; cursor: pointer;
+}
+.page-tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
 .hint p { margin: 4px 0; color: var(--muted); font-size: 13px; }
 .hint .sub { opacity: .8; }
 
