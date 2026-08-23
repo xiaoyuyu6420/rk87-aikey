@@ -62,6 +62,9 @@ class KeySession extends EventEmitter {
     this.stopped = false;
     this.pendingHb = false;   // 心跳已发未回应（连续 3 次丢失视为断线）
     this.hbMiss = 0;
+    this.lastAudioTs = 0;     // 最近一次音频流帧时间（语音推流活跃信号）
+    this._stopGuardTs = 0;    // 请求停止推流的时刻（停止看护）
+    this._stuckRetry = 0;     // 停止命令重发次数
     this.pressed = new Set(); // 按键边沿去重
     this.lastKey = null;
     this.channel = 0xf1;      // 写帧通道前缀
@@ -112,8 +115,11 @@ class KeySession extends EventEmitter {
       this._readLoop();
       // 官方时序：open 后立即发一次心跳
       this._write(5, [], 'heartbeat-initial');
-      // 每秒心跳（保持会话；也是握手第一步）
-      this.hbTimer = setInterval(() => this._write(5, [], 'heartbeat'), 1000);
+      // 每秒心跳（保持会话；也是握手第一步）+ 语音停止看护
+      this.hbTimer = setInterval(() => {
+        this._write(5, [], 'heartbeat');
+        this._voiceStopGuard();
+      }, 1000);
       // 握手超时：键盘不在此口上（如 dongle 插着但键盘走蓝牙）→ 换口
       if (this.hsTimer) clearTimeout(this.hsTimer);
       this.hsTimer = setTimeout(() => {
@@ -164,6 +170,7 @@ class KeySession extends EventEmitter {
     }
     // 音频流直通（renderer 桥接消费）
     if (data[0] === 0x1b) {
+      this.lastAudioTs = Date.now();
       this.emit('audio', data);
       return;
     }
@@ -203,6 +210,7 @@ class KeySession extends EventEmitter {
     }
     if (cmd === 107) {
       this.micOn = false;
+      this._stopGuardTs = 0; // 固件确认停麦，撤销停止看护
       this.emit('mic', { on: false, source: 'device' });
       return;
     }
@@ -219,6 +227,39 @@ class KeySession extends EventEmitter {
     }
     // 其他命令帧（156/208/177…）透传给需要的地方
     this.emit('cmd', { cmd, data: payload });
+  }
+
+  // 语音停止看护：松开语音键（stopVoice 已发 cmd=4）后若固件仍持续推音频流，
+  // 打字报文会被音频帧淹没（表现：语音之后打字时好时坏，切蓝牙才恢复）。
+  // 停止命令走蓝牙可能丢包且无确认 → 流不停就重发；重发仍不停说明固件卡死，
+  // 主动断开重连强制固件复位（等效手动切蓝牙，但自动完成）。
+  _voiceStopGuard() {
+    if (!this._stopGuardTs || !this.connected) return;
+    const now = Date.now();
+    const audioIdle = !this.lastAudioTs || now - this.lastAudioTs > 2000;
+    if (audioIdle) {
+      // 流已停（可能 107 丢了）：撤销看护，并补偿 UI 的开麦状态
+      if (this.micOn) {
+        this.micOn = false;
+        this.emit('mic', { on: false, source: 'guard' });
+      }
+      this._stopGuardTs = 0;
+      this._stuckRetry = 0;
+      return;
+    }
+    if (now - this._stopGuardTs > 2500) {
+      // 已请求停止超过 2.5s 但流仍在推
+      this._stuckRetry++;
+      if (this._stuckRetry >= 2) {
+        console.log('[session] 语音推流卡死（停止命令无效），强制重连');
+        this._stuckRetry = 0;
+        this._stopGuardTs = 0;
+        this._onDisconnect('voice-stuck');
+      } else {
+        console.log('[session] 停止推流未生效，重发 cmd=4');
+        this._write(4, [], 'stop-voice-retry');
+      }
+    }
   }
 
   _handleKey(code) {
@@ -243,6 +284,8 @@ class KeySession extends EventEmitter {
     this.verified = false;
     this.got104 = false;
     this.micOn = false;
+    this._stopGuardTs = 0;
+    this._stuckRetry = 0;
     this.pressed.clear(); // 断线清按键状态，避免重连后边沿错乱
     kbdInject.reset();    // 回注侧同样清边沿（残留按下的键全部抬起）
     this.pendingHb = false;
@@ -286,12 +329,15 @@ class KeySession extends EventEmitter {
   askVoice() {
     if (!this.connected) return false;
     this._write(3, [], 'ask-voice');
+    this._stopGuardTs = 0; // 新开麦：撤销上一轮的停止看护（防快速连按误伤）
+    this._stuckRetry = 0;
     return true;
   }
 
   stopVoice() {
     if (!this.dev) return false;
     this._write(4, [], 'stop-voice');
+    this._stopGuardTs = Date.now(); // 启动停止看护：流不停则重发/强制重连
     return true;
   }
 
