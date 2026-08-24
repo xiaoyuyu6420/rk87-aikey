@@ -126,6 +126,44 @@ const HB104 = Buffer.from([5, 0xff, 0xf1, 0xfe, 0xc0, 104, 0, 0xef, 0, 0, 0, 0, 
   }
   }
 
+  // [T6] 电量解析：cmd=156（查询回应）/ cmd=208（主动上报）。stub 设备 interface=-1
+  // → isBluetoothHid=true → transport='蓝牙'，恰好覆盖「蓝牙口取真实电量」分支
+  console.log('[T6] 电量解析 cmd=156/208');
+  {
+    FakeHID.instances.length = 0;
+    const s = new KeySession();
+    s.start();
+    const emitted = [];
+    s.on('battery', b => emitted.push({ ...b }));
+    ok(s.transport === '蓝牙', `测试会话为蓝牙口（实得 ${s.transport}）`);
+
+    // cmd=156（len≥11，payload[4]=电量）：蓝牙取真实值
+    const f156 = Buffer.alloc(20);
+    f156[5] = 156; f156[6] = 11; f156[11] = 73;
+    s._onData(f156);
+    ok(s.battery && s.battery.level === 73 && s.battery.charging === false,
+      `156: 蓝牙口取真实电量 payload[4]=73（实得 ${s.battery && s.battery.level}）`);
+    ok(emitted.length === 1, '首次上报 emit battery');
+    s._onData(Buffer.from(f156));
+    ok(emitted.length === 1, '同电量去重不重复 emit');
+    const f156b = Buffer.from(f156); f156b[11] = 72;
+    s._onData(f156b);
+    ok(emitted.length === 2 && emitted[1].level === 72, '电量变化重新 emit');
+
+    // cmd=208（len≥2，payload[0]=充电标志、payload[1]=电量）：官方反向语义 0==充电中
+    const mk208 = (flag, level) => { const b = Buffer.alloc(12); b[5] = 208; b[6] = 2; b[7] = flag; b[8] = level; return b; };
+    s._onData(mk208(0, 88));
+    ok(s.battery.level === 88 && s.battery.charging === true, '208: payload[0]==0 → 充电中');
+    s._onData(mk208(1, 87));
+    ok(s.battery.level === 87 && s.battery.charging === false, '208: payload[0]!=0 → 未充电');
+
+    // len<2 短帧不进解析、不改状态
+    const short = Buffer.alloc(10); short[5] = 208; short[6] = 1; short[7] = 1;
+    s._onData(short);
+    ok(s.battery.level === 87 && s.battery.charging === false, 'len<2 短帧忽略');
+    s.stop();
+  }
+
   console.log(`\n结果: ${pass} pass / ${fail} fail`);
   process.exit(fail ? 1 : 0);
 })();

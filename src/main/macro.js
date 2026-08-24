@@ -118,18 +118,37 @@ function trimSteps(steps) {
 }
 
 // ---------- 回放引擎 ----------
-const replay = { active: false, timers: [] };
+const ESC_VK = 0x1b;
+const REPLAY_POLL_MS = 15; // Escape 中断轮询间隔，与录制轮询同级
+const replay = { active: false, timers: [], pollTimer: null };
 
 function isReplaying() {
   return replay.active;
 }
 
 // postKey: (name, down, flags) —— 由 index.js 注入 actions.postRawKey
-function replayMacro(steps, postKey) {
+// opts.getKeyState / opts.pollMs 可注入（测试用）；缺省走 defaultKeyState
+function replayMacro(steps, postKey, opts = {}) {
   if (replay.active) return false;
   const list = Array.isArray(steps) ? steps.filter(s => s && typeof s.name === 'string') : [];
   if (!list.length) return false;
   replay.active = true;
+  // 安全边界：回放期间新按下 Escape 立即掐断剩余步骤。
+  // 拿不到系统键状态（Linux/加载失败）则退化为不可中断，不影响回放本身
+  try {
+    const gs = opts.getKeyState || defaultKeyState();
+    if (gs) {
+      let prevEsc = gs(ESC_VK) ? 1 : 0; // 起播时已按住的 Escape 不算中断
+      replay.pollTimer = setInterval(() => {
+        try {
+          const down = gs(ESC_VK) ? 1 : 0;
+          if (down && !prevEsc) { abortReplay(); return; }
+          prevEsc = down;
+        } catch (_) { /* 单次查询失败跳过 */ }
+      }, Math.max(1, Number(opts.pollMs) || REPLAY_POLL_MS));
+      replay.pollTimer.unref && replay.pollTimer.unref();
+    }
+  } catch (_) { /* 键状态不可用：回放照跑 */ }
   let t = 0;
   for (const s of list) {
     t += Math.max(0, Number(s.dt) || 0);
@@ -137,15 +156,14 @@ function replayMacro(steps, postKey) {
       try { postKey(s.name, s.down !== false, 0); } catch (_) { /* 发键失败跳过该步 */ }
     }, t));
   }
-  replay.timers.push(setTimeout(() => {
-    replay.timers = [];
-    replay.active = false;
-  }, t + 100));
+  // 自然结束与中断共用一套清理（清 Escape 轮询 + 复位状态）
+  replay.timers.push(setTimeout(abortReplay, t + 100));
   return true;
 }
 
-// 中断回放（录制开始/退出应用时清理孤儿 timer）
+// 中断回放（录制开始/退出应用/Escape 时清理孤儿 timer）
 function abortReplay() {
+  if (replay.pollTimer) { clearInterval(replay.pollTimer); replay.pollTimer = null; }
   for (const tid of replay.timers) clearTimeout(tid);
   replay.timers = [];
   replay.active = false;

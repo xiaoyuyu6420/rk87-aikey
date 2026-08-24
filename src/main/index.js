@@ -688,8 +688,11 @@ ipcMain.handle('set-settings', (_e, settings) => {
   if ('soundEnabled' in settings) {
     if (settings.soundEnabled) { createSoundWindow(); sendSoundConfig(); }
     else if (soundWin && !soundWin.isDestroyed()) soundWin.destroy();
-    // 音效开关影响统计轮询是否需要保持
-    if (stats && !stats.counting && settings.soundEnabled) stats.start();
+    // 音效开关影响统计轮询是否需要保持：统计关时——音效开→轮询保住（事件源不能断），音效关→轮询停
+    if (stats && !stats.counting) {
+      if (settings.soundEnabled) stats.start();
+      else stats.stop();
+    }
   }
   if ('soundVolume' in settings) sendSoundConfig();
   if ('soundPack' in settings || 'soundCustomDir' in settings) {

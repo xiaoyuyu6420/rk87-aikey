@@ -129,6 +129,40 @@ console.log('[T6] 回放：序列/时序/防重入/中断');
   ok(!isReplaying(), 'abort 后状态复位');
   ok(replayMacro([], post) === false, '空宏拒绝回放');
 
+  // [T7] 安全边界：回放期间新按下 Escape 立即掐断剩余步骤
+  console.log('[T7] 回放中按 Escape 中断');
+  {
+    const escDown = { v: false };
+    const gs = code => (code === 0x1b ? escDown.v : false);
+    const sent3 = [];
+    const escSteps = [
+      { name: 'a', down: true, dt: 5 },
+      { name: 'a', down: false, dt: 5 },
+      { name: 'b', down: true, dt: 120 }, // Escape 按下后不该发出来
+      { name: 'b', down: false, dt: 5 },
+    ];
+    ok(replayMacro(escSteps, (n, d) => sent3.push({ n, d }), { pollMs: 5, getKeyState: gs }),
+      '带 Escape 监听的回放启动');
+    await sleep(30); // 前两步已落地
+    ok(sent3.length === 2, `Escape 前步骤正常发（实得 ${sent3.length}）`);
+    escDown.v = true; // 用户按下 Escape
+    await sleep(250);
+    ok(!isReplaying(), 'Escape 中断后状态复位');
+    ok(sent3.length === 2, `Escape 后剩余步骤不发（实得 ${sent3.length}）`);
+
+    // 起播时已按住的 Escape 不误杀（只认新按下边沿），松开后自然回放完
+    escDown.v = true;
+    const sent4 = [];
+    ok(replayMacro([{ name: 'a', down: true, dt: 5 }, { name: 'a', down: false, dt: 5 }],
+      (n, d) => sent4.push({ n, d }), { pollMs: 5, getKeyState: gs }),
+      '按住 Escape 起播');
+    await sleep(30);
+    escDown.v = false;
+    await sleep(150);
+    ok(!isReplaying(), '松开后自然结束');
+    ok(sent4.length === 2, `起播时已按住的 Escape 不误杀（实得 ${sent4.length} 步）`);
+  }
+
   console.log(`\n结果: ${pass} pass / ${fail} fail`);
   process.exit(fail ? 1 : 0);
 })();
