@@ -4,7 +4,9 @@
 
 const path = require('path');
 
-const DLL_PATH = path.join(__dirname, '../../vendor/deep-filter/df.dll');
+// 原生库按平台命名：CI 在各平台从源码编译（build.yml），本地开发可手动放置
+const LIB_NAMES = { win32: 'df.dll', darwin: 'libdf.dylib', linux: 'libdf.so' };
+const LIB_PATH = path.join(__dirname, '../../vendor/deep-filter', LIB_NAMES[process.platform] || 'df.dll');
 const MODEL_PATH = path.join(__dirname, '../../vendor/deep-filter/model/model.tar.gz');
 
 class DeepFilter {
@@ -21,11 +23,11 @@ class DeepFilter {
     if (this.ready) return true;
     // df_create 对坏路径会原生 panic 直接杀进程——先自行校验文件存在
     const fs = require('fs');
-    if (!fs.existsSync(DLL_PATH)) throw new Error('缺少 ' + DLL_PATH);
+    if (!fs.existsSync(LIB_PATH)) throw new Error('缺少 ' + LIB_PATH);
     if (!fs.existsSync(MODEL_PATH)) throw new Error('缺少模型 ' + MODEL_PATH);
 
     const koffi = require('koffi');
-    const lib = koffi.load(DLL_PATH);
+    const lib = koffi.load(LIB_PATH);
     this._create = lib.func('void* df_create(const char* path, float atten_lim, const char* log_level)');
     this._frameLenFn = lib.func('unsigned long long df_get_frame_length(void* st)');
     this._process = lib.func('float df_process_frame(void* st, float* input, float* output)');

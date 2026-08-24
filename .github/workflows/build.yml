@@ -22,6 +22,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # DeepFilterNet3 原生库：各平台从源码编译（产物按平台命名进 vendor/deep-filter/，
+      # electron-builder 经 files.vendor/** 打进安装包；缺失时应用自动回退 RNNoise）
+      - name: Clone DeepFilterNet
+        shell: bash
+        run: git clone --depth 1 https://github.com/Rikorose/DeepFilterNet.git "$RUNNER_TEMP/dfn"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ runner.temp }}/dfn/libDF
+
+      - name: Build DFN lib (windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          cargo build --release -p deep_filter --features capi --no-default-features \
+            --manifest-path "$RUNNER_TEMP/dfn/libDF/Cargo.toml"
+          mkdir -p vendor/deep-filter
+          cp "$RUNNER_TEMP/dfn/target/release/df.dll" vendor/deep-filter/
+
+      - name: Build DFN lib (macos universal2)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          for t in x86_64-apple-darwin aarch64-apple-darwin; do
+            cargo build --release -p deep_filter --features capi --no-default-features \
+              --manifest-path "$RUNNER_TEMP/dfn/libDF/Cargo.toml" --target $t
+          done
+          mkdir -p vendor/deep-filter
+          lipo -create -output vendor/deep-filter/libdf.dylib \
+            "$RUNNER_TEMP/dfn/target/x86_64-apple-darwin/release/libdf.dylib" \
+            "$RUNNER_TEMP/dfn/target/aarch64-apple-darwin/release/libdf.dylib"
+          file vendor/deep-filter/libdf.dylib
+
       - uses: pnpm/action-setup@v4
         with:
           version: 11
