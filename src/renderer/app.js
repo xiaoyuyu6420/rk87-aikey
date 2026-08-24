@@ -751,6 +751,7 @@ async function initMicBridge() {
     if (bridge.ctx) { try { bridge.ctx.close(); } catch (_) {} }
     bridge.ctx = bridge.node = null;
     bridge.queue = [];
+    bridge.chunkOff = 0; // 指向旧队首的内部偏移，不归零则重建后首帧从中间开始播（跳音）
     bridge.enabled = false;
   }
 

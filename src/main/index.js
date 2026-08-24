@@ -37,29 +37,60 @@ let macroRec = null;        // 宏录制器（仅录制期间存在 5ms 轮询�
 let macroArmed = false;     // 录制期间：抑制绑定动作/开麦联动，绑定键强制透传（键状态可见才能录到）
 let soundWin = null;        // 打字音效隐藏页（0x0 常驻；关闭音效时不创建，零开销）
 
+// portable 版配置随 exe 走：electron-builder 的 portable 启动器注入
+// PORTABLE_EXECUTABLE_DIR 环境变量（U 盘携带场景）；目录不可写（只读介质）则
+// 回退默认 %APPDATA%。必须在一切 getPath('userData') 消费方之前执行。
+try {
+  if (process.env.PORTABLE_EXECUTABLE_DIR) {
+    const portableData = path.join(process.env.PORTABLE_EXECUTABLE_DIR, 'rk87-aikey-data');
+    fs.mkdirSync(portableData, { recursive: true });
+    fs.accessSync(portableData, fs.constants.W_OK);
+    app.setPath('userData', portableData);
+  }
+} catch (_) { /* 只读介质：保持默认路径 */ }
+
 // 常驻托盘应用：瞬时异常（如 stdout 管道断开的 EPIPE）吞掉保活；
 // 但短窗内连续异常说明主进程已进坏状态 → 自动拉起新实例自愈。
 // （僵尸态的危害不止功能失灵：F10 长按无人应答 cmd=3，固件会走「Win+R 引导下载」）
 const CRASH_WINDOW_MS = 60 * 1000;
 const CRASH_MAX_IN_WINDOW = 3;
+const CRASH_MAX_DEPTH = 3; // 自愈代数上限：跨重启仍坏 → 放弃自愈（防重启风暴）
 let crashTimes = [];
+// 崩溃自启代数：--crash-restart=N（老版本无 =N 形式按 1 计）
+function crashRestartDepth() {
+  const a = process.argv.find(x => x === '--crash-restart' || x.startsWith('--crash-restart='));
+  if (!a) return 0;
+  return parseInt(a.split('=')[1], 10) || 1;
+}
 process.on('uncaughtException', e => {
   try { console.log('[uncaught]', e && e.message); } catch (_) {}
   const now = Date.now();
   crashTimes = crashTimes.filter(t => now - t < CRASH_WINDOW_MS);
   crashTimes.push(now);
   if (!isQuitting && crashTimes.length >= CRASH_MAX_IN_WINDOW) {
+    const depth = crashRestartDepth();
+    if (depth >= CRASH_MAX_DEPTH) {
+      try { console.log(`[uncaught] 已连续 ${depth} 代自动重启仍异常，停止自愈（重装或查日志）`); } catch (_) {}
+      return;
+    }
     try { console.log('[uncaught] 短窗内连续异常，判定坏状态，自动重启'); } catch (_) {}
     try { releaseDevices(); } catch (_) {} // app.exit 不走 before-quit，清理须手动
-    app.relaunch({ args: [...process.argv.slice(1), '--crash-restart'] });
+    // 清掉旧的自启参数再追加，防跨代累积
+    const cleanArgs = process.argv.slice(1).filter(x => x !== '--crash-restart' && !x.startsWith('--crash-restart='));
+    app.relaunch({ args: [...cleanArgs, `--crash-restart=${depth + 1}`] });
     app.exit(1);
   }
 });
 
-// 渲染进程崩溃：托盘应用不能没 UI，重载窗口即可，不必整体重启
-app.on('render-process-gone', (_e, _wc, details) => {
+// 渲染进程崩溃：托盘应用不能没 UI，主窗口重载即可；音效隐藏页自愈重建
+app.on('render-process-gone', (_e, wc, details) => {
   try { console.log('[render-gone]', details && details.reason); } catch (_) {}
-  if (win && !win.isDestroyed()) win.webContents.reload();
+  if (soundWin && !soundWin.isDestroyed() && wc === soundWin.webContents) {
+    soundWin.destroy();
+    if (cfg && cfg.settings && cfg.settings.soundEnabled) createSoundWindow();
+    return;
+  }
+  if (win && !win.isDestroyed() && wc === win.webContents) win.webContents.reload();
 });
 
 // ---------- 文件日志 ----------
@@ -93,13 +124,20 @@ if (!gotLock) {
   app.on('activate', () => showWindow()); // mac：点 Dock/应用图标重新弹设置窗口
   app.whenReady().then(boot).then(() => {
     // 崩溃自启后的新实例：让用户知道刚才发生过异常重启（而非静默吞掉）
-    if (process.argv.includes('--crash-restart')) {
+    if (crashRestartDepth() > 0) {
       try {
         const n = new Notification({ title: 'RK87 AIKey', body: '检测到异常退出，已自动重启' });
         n.on('click', () => showWindow());
         n.show();
       } catch (_) {}
     }
+  }).catch(e => {
+    // boot 中途抛错（如托盘图标创建失败）：session/watcher 可能已启动，但没托盘
+    // 没窗口 = 半启动僵尸（用户只能任务管理器）。尽力补起 UI；再失败交给崩溃
+    // 自启机制（3 次内重启一代，CRASH_MAX_DEPTH 封顶）
+    try { console.log('[boot] 启动失败:', e && (e.stack || e.message || e)); } catch (_) {}
+    try { if (!tray) createTray(); } catch (_) {}
+    try { showWindow(); } catch (_) {}
   });
 }
 
@@ -144,6 +182,8 @@ function onAudioPacket(buf, opts = {}) {
 }
 
 function enqueuePcm(chunk) {
+  // 桥未启用：渲染端收到即丢，白白 IPC 传 ~32KB/s——主进程侧直接丢弃
+  if (!cfg || cfg.settings.micBridgeEnabled !== true) return;
   pcmBatch.push(chunk);
   if (!pcmBatchTimer) {
     pcmBatchTimer = setTimeout(() => {
@@ -188,7 +228,11 @@ function boot() {
   // 有线口（8102）的音频流/麦克风状态同样进主管线（纯有线连接时语音才不至于静默失效）
   watcher.on('audio', buf => { if (!usbSessionOwns()) onAudioPacket(buf); });
   watcher.on('mic', ({ on }) => {
-    if (!usbSessionOwns() && win) win.webContents.send('mic-state', on);
+    if (!usbSessionOwns() && win && !win.isDestroyed()) win.webContents.send('mic-state', on);
+    if (!on) {
+      stopPsBlocker(); // watcher 路径推流的电源阻塞同样要释放（session 路径见 session.on('mic')）
+      wiredPcmAccum = null; // 攒批残留不跨会话：最多 10ms 旧音频拼进下次开麦开头（串音）
+    }
   });
   watcher.start();
 
@@ -203,8 +247,11 @@ function boot() {
     if (win) win.webContents.send('session-status', connected);
   });
   session.on('mic', ({ on }) => {
-    if (win) win.webContents.send('mic-state', on);
-    if (!on) stopPsBlocker();
+    if (win && !win.isDestroyed()) win.webContents.send('mic-state', on);
+    if (!on) {
+      stopPsBlocker();
+      wiredPcmAccum = null; // 同 watcher 路径：攒批残留不跨会话
+    }
   });
   // USB 口音频是原始 PCM（rawPcm），蓝牙/2.4G 是 SBC 编码——按 transport 分流
   session.on('audio', buf => onAudioPacket(buf, { rawPcm: session.transport === 'USB' }));
@@ -246,7 +293,7 @@ function boot() {
     if (macroArmed) return null; // 宏录制中：不拦截不执行，走原生回注（键状态系统层可见）
     if (binding.type === 'none') return null;
     console.log(`[key] ${keyId} down（标准报文，已拦截）`);
-    if (win && !win.isDestroyed()) win.webContents.send('key-event', { keyId, phase: 'down' });
+    if (win && !win.isDestroyed() && win.isVisible()) win.webContents.send('key-event', { keyId, phase: 'down' });
     const r = actions.run(binding);
     if (r && r.ok === false) console.log(`[action] ${keyId} 失败:`, r.error);
     return binding.passthrough === true ? 'passthrough' : 'block';
@@ -382,7 +429,8 @@ function onKey({ code, keyId, phase }) {
   if (!aiModeOn) onAiMode(true); // cmd=159 到达 = 键盘实际处于 AI 模式（209 事件可能在启动前已错过）
   const def = lookupKey(code) || { id: keyId, label: keyId };
   console.log(`[key] ${def.label} (${keyId}) ${phase}`);
-  if (win && !win.isDestroyed()) {
+  // 窗口隐藏到托盘时跳过：渲染端无人看，省掉每击键 2 条 IPC 唤醒 + DOM 高亮
+  if (win && !win.isDestroyed() && win.isVisible()) {
     win.webContents.send('key-event', { code, keyId: def.id, label: def.label, phase });
   }
   // 开麦键联动：按住 = 主动开麦，松开 = 关麦（键可在设置里勾选，默认 F10 + AI 键；空 = 全关）
@@ -566,12 +614,14 @@ function listSoundFiles() {
   }
 }
 
-function sendSoundBuffers() {
+async function sendSoundBuffers() {
   if (!soundWin || soundWin.isDestroyed()) return;
-  const list = listSoundFiles().map(p => ({
+  // 异步读盘：custom 目录可自选大 wav，同步 readFileSync 会卡主进程（音频批/轮询抖动）
+  const list = await Promise.all(listSoundFiles().map(async p => ({
     name: path.basename(p),
-    data: new Uint8Array(fs.readFileSync(p)),
-  }));
+    data: new Uint8Array(await fs.promises.readFile(p)),
+  })));
+  if (!soundWin || soundWin.isDestroyed()) return; // 等待期间窗口可能已销毁
   soundWin.webContents.send('sound-buffers', list);
 }
 
@@ -670,6 +720,7 @@ function rebuildTrayMenu() {
 }
 
 function showWindow() {
+  if (win && win.isDestroyed()) win = null; // 退出中断等场景：防 "Object has been destroyed"
   if (win) {
     if (win.isMinimized()) win.restore();
     win.show();
@@ -699,6 +750,7 @@ function showWindow() {
       win.hide();
     }
   });
+  win.on('closed', () => { win = null; });
   win.webContents.on('did-finish-load', () => {
     win.webContents.send('device-status', deviceConnected);
     win.webContents.send('session-status', sessionOnline);
@@ -742,6 +794,8 @@ ipcMain.handle('set-settings', (_e, settings) => {
   cfg.settings = { ...cfg.settings, ...settings };
   config.save(cfg);
   if ('autostart' in settings) setAutostart(settings.autostart);
+  // 降噪开关：即时生效（旁路/恢复引擎），无需重启
+  if ('denoiseEnabled' in settings && micPipeline) micPipeline.setDenoise(settings.denoiseEnabled !== false);
   if ('statsEnabled' in settings && stats) {
     stats.counting = settings.statsEnabled !== false;
     // 统计关但音效开：轮询保持（keystroke 事件源不能断）；两者都关才停

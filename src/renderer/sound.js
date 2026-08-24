@@ -38,9 +38,14 @@ function play() {
   src.buffer = buffers[(Math.random() * buffers.length) | 0];
   src.playbackRate.value = 0.94 + Math.random() * 0.12;
   src.connect(master);
-  voices++;
   src.onended = () => { voices--; };
-  src.start();
+  voices++;
+  try {
+    src.start();
+  } catch (_) {
+    voices--; // start 抛异常则 onended 不会触发，不回收会累计到上限后音效永久静默
+    return;
+  }
   if (!play._once) { play._once = true; log('首次播放 OK（后续静默）'); }
 }
 

@@ -1,0 +1,10 @@
+UNPACKED 1102 /vendor/deep-filter/LICENSE
+UNPACKED 16274432 /vendor/deep-filter/df.dll
+UNPACKED 2192 /vendor/deep-filter/model/config.ini
+UNPACKED 3340803 /vendor/deep-filter/model/df_dec.onnx
+UNPACKED 1954042 /vendor/deep-filter/model/enc.onnx
+UNPACKED 3292397 /vendor/deep-filter/model/erb_dec.onnx
+UNPACKED 7978246 /vendor/deep-filter/model/model.tar.gz
+hidapi-files: 0
+df-unpacked: true
+model-unpacked: true

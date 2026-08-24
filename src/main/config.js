@@ -98,6 +98,12 @@ function load() {
   try {
     raw = JSON.parse(fs.readFileSync(configPath(), 'utf8'));
   } catch (e) {
+    if (e && e.code === 'ENOENT') {
+      // 首次启动无配置文件：静默走默认，不算「损坏」
+      const cfg1 = JSON.parse(JSON.stringify(DEFAULTS));
+      projectActive(cfg1);
+      return cfg1;
+    }
     // 损坏（写一半崩溃/磁盘错误）时留证并重建，避免用户绑定静默清零无法排查
     try { fs.renameSync(configPath(), configPath() + '.corrupt'); } catch (_) {}
     console.log('[config] 读取失败已重建（原文件存为 .corrupt）:', e.message);

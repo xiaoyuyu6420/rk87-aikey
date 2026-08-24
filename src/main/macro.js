@@ -7,7 +7,7 @@
 // 回放：setTimeout 链按 dt 逐发（发键复用 actions.postRawKey）。Windows 定时器精度
 //   约 15ms，快于它的间隔会被拉平（打字节奏宏无感）。回放期间防重入、可中断。
 
-const RECORD_INTERVAL_MS = 5;
+const RECORD_INTERVAL_MS = 10; // Windows 定时器精度 ~15ms，5ms 纯属白烧；10ms 对 ≥40ms 的按键边沿足够
 const RECORD_MAX_MS = 30000;
 const FIRST_STEP_MAX_MS = 500; // 保存时修剪首步（开始录制到首键的用户反应延迟）
 
@@ -120,7 +120,7 @@ function trimSteps(steps) {
 // ---------- 回放引擎 ----------
 const ESC_VK = 0x1b;
 const REPLAY_POLL_MS = 15; // Escape 中断轮询间隔，与录制轮询同级
-const replay = { active: false, timers: [], pollTimer: null };
+const replay = { active: false, timers: [], pollTimer: null, postKey: null, downKeys: [] };
 
 function isReplaying() {
   return replay.active;
@@ -133,6 +133,8 @@ function replayMacro(steps, postKey, opts = {}) {
   const list = Array.isArray(steps) ? steps.filter(s => s && typeof s.name === 'string') : [];
   if (!list.length) return false;
   replay.active = true;
+  replay.postKey = postKey;
+  replay.downKeys = [];
   // 安全边界：回放期间新按下 Escape 立即掐断剩余步骤。
   // 拿不到系统键状态（Linux/加载失败）则退化为不可中断，不影响回放本身
   try {
@@ -153,19 +155,33 @@ function replayMacro(steps, postKey, opts = {}) {
   for (const s of list) {
     t += Math.max(0, Number(s.dt) || 0);
     replay.timers.push(setTimeout(() => {
-      try { postKey(s.name, s.down !== false, 0); } catch (_) { /* 发键失败跳过该步 */ }
+      try {
+        postKey(s.name, s.down !== false, 0);
+        // 跟踪回放中按住的键：中断时需补发抬起（防系统级卡修饰键）
+        const i = replay.downKeys.indexOf(s.name);
+        if (s.down !== false) { if (i < 0) replay.downKeys.push(s.name); }
+        else if (i >= 0) replay.downKeys.splice(i, 1);
+      } catch (_) { /* 发键失败跳过该步 */ }
     }, t));
   }
-  // 自然结束与中断共用一套清理（清 Escape 轮询 + 复位状态）
+  // 自然结束与中断共用一套清理（清 Escape 轮询 + 补抬起残留按住键 + 复位状态）
   replay.timers.push(setTimeout(abortReplay, t + 100));
   return true;
 }
 
-// 中断回放（录制开始/退出应用/Escape 时清理孤儿 timer）
+// 中断回放（录制开始/退出应用/Escape 时清理孤儿 timer）。
+// 已注入 down 但对应 up 还在未触发的 timer 里 → 直接丢弃会让系统认为修饰键
+// 按住不放（后续打字全变快捷键）。必须倒序补发抬起。
 function abortReplay() {
   if (replay.pollTimer) { clearInterval(replay.pollTimer); replay.pollTimer = null; }
   for (const tid of replay.timers) clearTimeout(tid);
   replay.timers = [];
+  if (replay.postKey && replay.downKeys.length) {
+    for (let i = replay.downKeys.length - 1; i >= 0; i--) {
+      try { replay.postKey(replay.downKeys[i], false, 0); } catch (_) {}
+    }
+  }
+  replay.downKeys = [];
   replay.active = false;
 }
 

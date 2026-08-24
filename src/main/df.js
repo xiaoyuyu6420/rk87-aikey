@@ -4,10 +4,15 @@
 
 const path = require('path');
 
+// 打包后 vendor/deep-filter 经 asarUnpack 落在 app.asar.unpacked——koffi.load 走
+// 原生 LoadLibrary/dlopen、df_create 走 Rust std::fs，都不经过 Electron 的 asar
+// 补丁 fs，直接给 asar 内虚拟路径必失败。路径含 app.asar 时整体替换为解包路径。
+function unpackedPath(p) { return p.replace(/\bapp\.asar\b/, 'app.asar.unpacked'); }
+
 // 原生库按平台命名：CI 在各平台从源码编译（build.yml），本地开发可手动放置
 const LIB_NAMES = { win32: 'df.dll', darwin: 'libdf.dylib', linux: 'libdf.so' };
-const LIB_PATH = path.join(__dirname, '../../vendor/deep-filter', LIB_NAMES[process.platform] || 'df.dll');
-const MODEL_PATH = path.join(__dirname, '../../vendor/deep-filter/model/model.tar.gz');
+const LIB_PATH = unpackedPath(path.join(__dirname, '../../vendor/deep-filter', LIB_NAMES[process.platform] || 'df.dll'));
+const MODEL_PATH = unpackedPath(path.join(__dirname, '../../vendor/deep-filter/model/model.tar.gz'));
 
 class DeepFilter {
   constructor() {

@@ -18,6 +18,8 @@ const VID = 0x248a;
 const CMD_PID = 0x8243;
 const USB_PID = 0x8102; // USB 口（2.4G dongle 实测也枚举此 PID，非文档口径的 8243）
 const HANDSHAKE_TIMEOUT = 4000; // 开口后无握手回应即换口重试（无回应=键盘不在该口，判定与时长无关，短超时加快多口轮换）
+// DIAG-PROBE 观测日志默认关闭（每键必打会刷爆 app.log）；标定时设 RK87_PROBE=1 打开
+const PROBE = !!process.env.RK87_PROBE;
 
 // vendor 官方 mi-hid 库（静态路径，按平台选择）
 function loadBinding() {
@@ -63,6 +65,7 @@ class KeySession extends EventEmitter {
     this.got104 = false;
     this.verified = false;
     this.stopped = false;
+    this._gen = 0;        // 设备代际（每次 _open 成功 +1，read 回调隔离用）
     this.pendingHb = false;   // 心跳已发未回应（连续 3 次丢失视为断线）
     this.hbMiss = 0;
     this.lastAudioTs = 0;     // 最近一次音频流帧时间（语音推流活跃信号）
@@ -109,6 +112,11 @@ class KeySession extends EventEmitter {
 
   _open() {
     if (this.stopped) return;
+    // 重连并发防护：手动重连（reconnect）与挂起的定时重连（watchTimer）叠加会
+    // 双开 HID 句柄、泄漏旧心跳 interval。开口前先撤销挂起重连与残留心跳。
+    if (this.watchTimer) { clearTimeout(this.watchTimer); this.watchTimer = null; }
+    if (this.hbTimer) { clearInterval(this.hbTimer); this.hbTimer = null; }
+    if (this.dev) return; // 已有活动句柄：当前会话由握手超时/心跳看护管理，勿重开
     try {
       if (!this.binding) this.binding = loadBinding();
       const cands = this.binding.devices()
@@ -127,6 +135,7 @@ class KeySession extends EventEmitter {
       this.channel = (bt || isUsb) ? 0xf1 : 0xf0; // USB 口实测只认 0xF1（0xF0 零回应）
       this.devPath = devInfo.path;
       this.dev = new this.binding.HID(devInfo.path);
+      this._gen++; // 设备代际：read 回调据此丢弃旧句柄的迟到回调（见 _readLoop）
       this.got104 = false;
       this.verified = false;
       this.connected = false;
@@ -180,8 +189,13 @@ class KeySession extends EventEmitter {
 
   _readLoop() {
     if (!this.dev || this.stopped) return;
+    // 代际隔离：旧句柄关闭延迟期间（_closeDev 最多 ~1.2s）其 read 仍可能完成回调。
+    // 不比对代际的话：错误回调会杀掉新会话（_onDisconnect 清的是当前状态）、
+    // 数据回调的递归 _readLoop 会对新设备发起第二个并发 read（node-hid 同步抛
+    // "read is still running" = 未捕获异常）。
+    const gen = this._gen;
     this.dev.read((err, data) => {
-      if (this.stopped) return;
+      if (this.stopped || gen !== this._gen) return;
       if (err) {
         this._onDisconnect('read-error: ' + (err.message || err));
         return;
@@ -227,7 +241,7 @@ class KeySession extends EventEmitter {
     const len = data[6];
     const payload = data.slice(7, 7 + len);
     // DIAG-PROBE：心跳回包若带状态 payload，打印（找「校验通道」）
-    if (cmd === 104 && len > 0) {
+    if (PROBE && cmd === 104 && len > 0) {
       console.log(`[probe] 104 payload hex=${payload.toString('hex')}`);
     }
     // 命令状态机
@@ -341,7 +355,7 @@ class KeySession extends EventEmitter {
     if (cmd === 159 && len === 1) {
       // DIAG-PROBE（临时观测）：逐条打印 159 到达时刻，验证「按住期间固件是否
       // 周期性重发 down」（若是 → 可做证据驱动的松手检测，取代超时看护）
-      {
+      if (PROBE) {
         const pk = lookupKey(payload[0]);
         console.log(`[probe] 159 code=0x${payload[0].toString(16)} phase=${pk ? pk.phase : '?'} t=${Date.now()}`);
       }
@@ -351,7 +365,7 @@ class KeySession extends EventEmitter {
     }
     // 其他命令帧（156/208/177…）透传给需要的地方
     // DIAG-PROBE：打印所有命令帧的 cmd+payload（限流：同内容 1s 一条）
-    {
+    if (PROBE) {
       const sig = cmd + ':' + payload.toString('hex');
       if (sig !== this._lastCmdSig || Date.now() - (this._lastCmdTs || 0) > 1000) {
         console.log(`[probe] cmd=${cmd} len=${len} hex=${payload.toString('hex')}`);
@@ -520,11 +534,13 @@ class KeySession extends EventEmitter {
 
   // ---------- 对外控制 ----------
   // 手动强制重连（托盘菜单）：蓝牙链路半死（心跳在线但打字报文停滞）时自恢复，
-  // 免去用户去系统设置切蓝牙
+  // 免去用户去系统设置切蓝牙。用户点击 = 立即重试：清空本轮无回应记录从头探测，
+  // 否则候选口全在 triedPaths 里时会退化成「再等 3s」而非立即开口
   reconnect() {
     if (this.stopped) return;
     if (this.dev) this._onDisconnect('manual-reconnect');
-    else this._open();
+    this.triedPaths.clear();
+    this._open();
   }
 
   askVoice() {
@@ -564,6 +580,7 @@ class KeySession extends EventEmitter {
     if (this.hsTimer) { clearTimeout(this.hsTimer); this.hsTimer = null; }
     if (this._probe12) { clearInterval(this._probe12); this._probe12 = null; }
     if (this._ghostWatch) { clearTimeout(this._ghostWatch); this._ghostWatch = null; }
+    if (this._fastRetry) { clearTimeout(this._fastRetry); this._fastRetry = null; }
     // 退出前若固件还在推流，尽力补一次停止（写是同步 SetReport，能赶在 close 前送达）
     if (this.dev && (this.micOn || (this.lastAudioTs && Date.now() - this.lastAudioTs < 2000))) {
       try { this._write(4, [], 'stop-voice-quit'); } catch (_) {}

@@ -28,6 +28,18 @@ function ensureSendInput() {
 }
 
 const KEYEVENTF_KEYUP = 0x0002;
+const KEYEVENTF_EXTENDEDKEY = 0x0001;
+// E0 前缀扩展扫描码键（导航/编辑区、Win、Apps、PrtSc、小键盘除号、右侧修饰）：
+// 注入时不带 EXTENDEDKEY 标志，读扫描码的程序（游戏/DirectInput/部分 RDP）收不到，
+// NumLock 关闭时方向键还会被解析成小键盘键
+const EXTENDED_VK = new Set([
+  0x21, 0x22, 0x23, 0x24, // PgUp PgDn End Home
+  0x25, 0x26, 0x27, 0x28, // Left Up Right Down
+  0x2c, 0x2d, 0x2e,       // PrintScreen Insert Delete
+  0x5b, 0x5c, 0x5d,       // LWin RWin Apps
+  0x6f,                    // NumpadDiv
+  0xa3, 0xa5,              // RControl RMenu
+]);
 
 // ---------- macOS: CoreGraphics CGEvent ----------
 let CG = null;
@@ -107,14 +119,24 @@ function vkOf(name) {
 // ---------- Windows 发键 ----------
 function pressKeyWin(vk, up) {
   ensureSendInput();
-  const inp = { type: 1, _pad: 0, ki: { wVk: vk, wScan: 0, dwFlags: up ? KEYEVENTF_KEYUP : 0, time: 0, dwExtraInfo: 0 }, _pad2: 0 };
-  SendInput(1, inp, 40);
+  const flags = (up ? KEYEVENTF_KEYUP : 0) | (EXTENDED_VK.has(vk) ? KEYEVENTF_EXTENDEDKEY : 0);
+  const inp = { type: 1, _pad: 0, ki: { wVk: vk, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 }, _pad2: 0 };
+  const n = SendInput(1, inp, 40);
+  if (n !== 1) {
+    // UIPI 拦截（目标是管理员权限窗口）等：留诊断线索，前 5 次打印（防刷屏）
+    if ((pressKeyWin._fails = (pressKeyWin._fails || 0) + 1) <= 5) {
+      console.log(`[inject] SendInput 失败 vk=0x${vk.toString(16)} ${up ? 'up' : 'down'}（目标可能是管理员窗口）`);
+    }
+    return false;
+  }
+  return true;
 }
 
 // ---------- macOS 发键 ----------
 function postMac(code, down, flags) {
   ensureCGEvent();
   const ev = CG.createKey(CG.source, code, down);
+  if (!ev) throw new Error('CGEventCreateKeyboardEvent 返回 null');
   if (flags) CG.setFlags(ev, flags);
   CG.post(kCGHIDEventTap, ev);
   CG.release(ev);

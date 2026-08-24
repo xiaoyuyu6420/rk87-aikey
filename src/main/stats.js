@@ -5,11 +5,14 @@
 // - 存储：userData/stats.json，防抖写盘（变更后 30s 或满 200 键），仅保留最近 90 天
 
 const fs = require('fs');
+const fsp = fs.promises;
 const path = require('path');
 const { app } = require('electron');
 const { VK_KEYNAMES } = require('./actions');
 
-const POLL_MS = 15;                 // 轮询间隔
+const POLL_MS = 15;                 // 活跃轮询间隔（检测到击键后 10s 内）
+const IDLE_POLL_MS = 30;            // 空闲轮询间隔：CPU 唤醒减半；30ms 仍能抓到 ≥40ms 的按键边沿
+const IDLE_AFTER_MS = 10 * 1000;    // 距上次击键边沿超过此时长进入空闲档
 const FLUSH_AFTER_MS = 30 * 1000;   // 数据变更后 30s 落盘
 const FLUSH_EVERY_KEYS = 200;       // 累计 200 键落盘一次
 const KEEP_DAYS = 90;               // 只保留最近 90 天
@@ -49,6 +52,9 @@ class TypingStats {
     this.lastKeyPressTs = 0;
     this.streakStartTs = 0;
     this.lastRemindTs = 0;
+    this._lastEdgeTs = 0;   // 最近一次键边沿时刻（空闲降频判定）
+    this._dayEndTs = 0;     // 当前日的午夜时刻（跨天检测，免每 tick 拼日期字符串）
+    this._flushing = false; // 异步落盘进行中（防并发写）
   }
 
   statsPath() {
@@ -121,31 +127,47 @@ class TypingStats {
     if (!this.loaded) this.load();
     this.prev = new Uint8Array(this.pollCodes.length);
     this.todayKey = localDate();
-    this.timer = setInterval(() => this.tick(), POLL_MS);
-    this.timer.unref && this.timer.unref();
+    // 自适应轮询：活跃 15ms / 空闲 30ms。setInterval 换挡要销毁重建，自调度
+    // setTimeout 每轮按最新档位排下一拍即可
+    const self = this;
+    const schedule = () => {
+      const delay = (this._lastEdgeTs && Date.now() - this._lastEdgeTs < IDLE_AFTER_MS)
+        ? POLL_MS : IDLE_POLL_MS;
+      this.timer = setTimeout(() => {
+        if (!self.timer) return; // stop() 已清
+        self.tick();
+        if (self.timer) schedule();
+      }, delay);
+      this.timer.unref && this.timer.unref();
+    };
+    this.timer = null;
+    schedule();
     this.started = true;
     return true;
   }
 
   stop() {
-    if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
     this.prev = null;
     this.started = false;
-    this.flush();
+    this._flushSync(); // 退出路径同步落盘（app 退出不等异步 IO）
   }
 
   tick() {
-    // 跨天换桶
-    const today = localDate();
-    if (today !== this.todayKey) {
-      this.todayKey = today;
+    // 跨天换桶：比较下次午夜时刻，免每 tick 三次 padStart 拼字符串（66 次/s）
+    const now = Date.now();
+    if (now >= this._dayEndTs) {
+      this.todayKey = localDate();
       this.trim();
+      const d = new Date(now);
+      this._dayEndTs = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime();
     }
     // 边沿检测：上一轮未按下 & 本轮按下 = 一次击键
     const gs = this.getKeyState;
     for (let i = 0; i < this.pollCodes.length; i++) {
       const down = gs(this.pollCodes[i]) ? 1 : 0;
       if (down && !this.prev[i]) {
+        this._lastEdgeTs = now;
         const name = this.pollNames[i];
         if (this.onKeystroke) this.onKeystroke(name); // 音效等订阅方
         if (this.counting) this.count(name);          // 统计关时只发事件不计数
@@ -153,17 +175,17 @@ class TypingStats {
       this.prev[i] = down;
     }
     // 防抖落盘：距最后一次变更满 30s
-    if (this.dirty && Date.now() - this.lastDirtyTs >= FLUSH_AFTER_MS) this.flush();
+    if (this.dirty && now - this.lastDirtyTs >= FLUSH_AFTER_MS) this.flush();
     // 疲劳检测：停笔超 1 分钟断段
-    if (this.streakStartTs && Date.now() - this.lastKeyPressTs > 60 * 1000) {
+    if (this.streakStartTs && now - this.lastKeyPressTs > 60 * 1000) {
       this.streakStartTs = 0;
     }
     if (this.streakStartTs &&
         this.fatigue.enabled &&
-        Date.now() - this.streakStartTs >= this.fatigue.minutes * 60 * 1000 &&
-        Date.now() - this.lastRemindTs >= 10 * 60 * 1000) {
-      this.lastRemindTs = Date.now();
-      this.streakStartTs = Date.now(); // 从提醒时刻重新计段，避免每 tick 重复弹
+        now - this.lastKeyPressTs >= this.fatigue.minutes * 60 * 1000 &&
+        now - this.lastRemindTs >= 10 * 60 * 1000) {
+      this.lastRemindTs = now;
+      this.streakStartTs = now; // 从提醒时刻重新计段，避免每 tick 重复弹
       this.notifyFatigue();
     }
   }
@@ -193,27 +215,51 @@ class TypingStats {
     if (++this.pending >= FLUSH_EVERY_KEYS) this.flush(); // 满 200 键立即落盘
   }
 
-  flush() {
+  // 运行期落盘走异步：90 天全量 JSON 序列化后写盘要几 ms，同步 IO 会抖动
+  // 15ms 轮询边沿检测和 120ms 音频批（推流期打字可能丢键计数/爆音）
+  async flush() {
+    if (!this.dirty || this._flushing) return;
+    this._flushing = true;
     this.pending = 0;
+    const snapshot = JSON.stringify({ days: this.days });
+    this.dirty = false; // 快照即清脏；写盘 await 期间的新击键会重新标脏，下轮补写
+    const p = this.statsPath();
+    const tmp = p + '.tmp';
+    let err = null;
+    try {
+      await fsp.mkdir(path.dirname(p), { recursive: true });
+      await fsp.writeFile(tmp, snapshot, 'utf8');
+      await fsp.rename(tmp, p); // 原子替换，避免写一半损坏
+    } catch (e) { err = e; }
+    this._flushing = false;
+    if (err) this._flushFail(err);
+  }
+
+  _flushFail(e) {
+    // 写盘失败（卷满/权限）：不能就此转为每 tick 重试——lastDirtyTs 停更会让
+    // 每个轮询周期都触发一次写风暴。把 lastDirtyTs 拨到未来：60s 内不再自动重试
+    //（有新击键仍会满 200 键落盘）
+    this.dirty = true;
+    this.lastDirtyTs = Date.now() + 60000;
+    if (!this._failLogged) {
+      this._failLogged = true;
+      console.log('[stats] 落盘失败（60s 后重试）:', e && e.message);
+    }
+  }
+
+  // 退出路径：同步落盘（before-quit 不等异步 IO，异步写会丢最后一次数据）
+  _flushSync() {
     if (!this.dirty) return;
-    this.dirty = false;
     try {
       const p = this.statsPath();
       const dir = path.dirname(p);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       const tmp = p + '.tmp';
       fs.writeFileSync(tmp, JSON.stringify({ days: this.days }), 'utf8');
-      fs.renameSync(tmp, p); // 原子替换，避免写一半损坏
-    } catch (_) {
-      // 写盘失败（卷满/权限）：不能就此转为每 tick 重试——lastDirtyTs 停更会让
-      // 每个轮询周期都触发一次同步写风暴（每 15ms 四连 syscall，打字回注抖动）。
-      // 把 lastDirtyTs 拨到未来：60s 内不再自动重试（有新击键仍会满 200 键落盘）
-      this.dirty = true;
-      this.lastDirtyTs = Date.now() + 60000;
-      if (!this._failLogged) {
-        this._failLogged = true;
-        console.log('[stats] 落盘失败（60s 后重试）:', _ && _.message);
-      }
+      fs.renameSync(tmp, p);
+      this.dirty = false;
+    } catch (e) {
+      this._flushFail(e);
     }
   }
 

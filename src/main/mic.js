@@ -71,6 +71,8 @@ class MicPipeline {
     this.rnnoise = new Denoiser();
     this.engine = null; // 'df' | 'rnnoise' | null
     this.denoiseFailLogged = false;
+    this._initing = false;        // initDenoiser 并发去重
+    this._denoiseRetryAt = 0;     // 引擎坏状态旁路后的冷却重试时刻
 
     // 样本 FIFO（16k 域 float32）
     this.fifo = new Float32Array(FIFO_CAP);
@@ -88,25 +90,49 @@ class MicPipeline {
     this.vad = 0;
   }
 
-  // wasm/ffi 初始化：boot 时预热；未就绪期间自动旁路降噪（其余 DSP 照常）
+  // wasm/ffi 初始化：boot 时预热；未就绪期间自动旁路降噪（其余 DSP 照常）。
+  // _initing 并发去重：setDenoise 与 boot 预热同时触发时不重复实例化 wasm
   async initDenoiser() {
     if (!this.denoiseWanted) return null;
     if (this.engine) return this.engine;
+    if (this._initing) return this.engine;
+    this._initing = true;
     try {
-      this.df.init();
-      this.engine = 'df';
-      return 'df';
-    } catch (e) {
-      console.log('[mic] DFN3 初始化失败，回退 RNNoise:', e.message);
+      try {
+        this.df.init();
+        this.engine = 'df';
+        return 'df';
+      } catch (e) {
+        console.log('[mic] DFN3 初始化失败，回退 RNNoise:', e.message);
+      }
+      try {
+        await this.rnnoise.init();
+        // 等待期间用户关掉了降噪：不能把引擎又点亮（开关语义优先）
+        if (!this.denoiseWanted) return null;
+        this.engine = 'rnnoise';
+        return 'rnnoise';
+      } catch (e) {
+        console.log('[mic] RNNoise 初始化失败，降噪旁路:', e.message);
+      }
+      return null;
+    } finally {
+      this._initing = false;
     }
-    try {
-      await this.rnnoise.init();
-      this.engine = 'rnnoise';
-      return 'rnnoise';
-    } catch (e) {
-      console.log('[mic] RNNoise 初始化失败，降噪旁路:', e.message);
+  }
+
+  // 运行时开关降噪（设置页切换即时生效，无需重启）：
+  //   off → 立即旁路（engine 置空，帧处理跳过 native 调用）
+  //   on  → 重新预热引擎（此前初始化失败/从未初始化也能恢复）
+  setDenoise(on) {
+    const wanted = on !== false;
+    if (wanted === this.denoiseWanted) return;
+    this.denoiseWanted = wanted;
+    if (!wanted) {
+      this.engine = null;
+    } else {
+      this.denoiseFailLogged = false;
+      this.initDenoiser().catch(() => {});
     }
-    return null;
   }
 
   // 蓝牙口：SBC 解码 240 样本进链
@@ -118,7 +144,9 @@ class MicPipeline {
       this.srcBuf[0] = 0xad; this.srcBuf[1] = 0x31; this.srcBuf[2] = 0x0c;
       pkt.copy(this.srcBuf, 3, 2 + f * 20, 2 + f * 20 + 20);
       const n = this.dec.decode(this.srcBuf, 23, this.dstBuf);
-      for (let i = 0; i < n && w < 240; i++) pcm[w++] = this.dstBuf.readInt16LE(i * 2);
+      // dstBuf 只容 80 样本：native 异常返回更大值时钳制，防 readInt16LE 越界抛错刷日志
+      const cnt = Math.min(n, 80);
+      for (let i = 0; i < cnt && w < 240; i++) pcm[w++] = this.dstBuf.readInt16LE(i * 2);
     }
     while (w < 240) pcm[w++] = 0;
     return this.feed(pcm, w);
@@ -154,6 +182,12 @@ class MicPipeline {
     // 1) 陡高通（16k 域）
     for (let i = 0; i < BLOCK; i++) blk[i] = this.hp2.process(this.hp1.process(blk[i]));
 
+    // 1.5) 引擎此前抛异常被旁路：冷却期到后自动重试恢复（用户补齐 dll/模型也生效）
+    if (!this.engine && this.denoiseWanted && this._denoiseRetryAt && Date.now() >= this._denoiseRetryAt) {
+      this._denoiseRetryAt = 0;
+      this.initDenoiser().then(e => { if (e) console.log('[mic] 降噪引擎重试恢复:', e); }).catch(() => {});
+    }
+
     // 2) 升采样 ×3 → DFN3/RNNoise 降噪（原地写回）→ 取中点降采样
     if (this.engine) this._denoiseBlock(blk);
 
@@ -180,6 +214,8 @@ class MicPipeline {
         vad = Math.max(0, Math.min(1, snr / 10)); // 局部 SNR 10dB 以上视为语音
       } else {
         const r = this.rnnoise.processFrame(up48);
+        // RNNoise 输出在独立缓冲（_fout），必须回拷——只取 vad 会把降噪静默变透传
+        up48.set(r.out);
         vad = r.vad;
       }
       // 降采样 ÷3：取中点样本。均值滤波会在 8k 处吃掉 ~3.5dB（s/sh 辅音能量区），
@@ -191,6 +227,9 @@ class MicPipeline {
         this.denoiseFailLogged = true;
         console.log('[mic] 降噪帧处理异常，旁路:', e.stack || e.message);
       }
+      // 引擎进了坏状态：立即旁路（否则每帧重复抛异常空转），15s 后自动重试恢复
+      this.engine = null;
+      this._denoiseRetryAt = Date.now() + 15000;
     }
   }
 
