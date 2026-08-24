@@ -164,6 +164,39 @@ const HB104 = Buffer.from([5, 0xff, 0xf1, 0xfe, 0xc0, 104, 0, 0xef, 0, 0, 0, 0, 
     s.stop();
   }
 
+  // [T7] 固件自开麦补发 cmd=3：物理语音键触发而主机没来得及应答时，固件等不到
+  // 官方软件回应会注入「Win+R + rkgaming 下载网址」引流——收到自开麦信号立即补发
+  console.log('[T7] 自开麦补发 cmd=3（防固件下载引导）');
+  {
+    FakeHID.instances.length = 0;
+    const s = new KeySession();
+    s.start();
+    const dev = FakeHID.instances.at(-1);
+    s._onData(HB104); // 握手两步：104 + 227 后才 connected（否则 askVoice 因离线拒发）
+    s._onData(Buffer.from([5, 0xff, 0xf1, 0xfe, 0xc0, 227, 0, 0xef, 0, 0, 0, 0, 0, 0, 0, 0]));
+    const asks = () => dev.written.filter(b => b[5] === 3).length;
+    const mkCmd = c => { const b = Buffer.alloc(12); b[5] = c; b[6] = 0; return b; };
+
+    // A：无主机请求，固件自开麦（106 到达）→ 恰好补发一条 cmd=3
+    s._onData(mkCmd(106));
+    ok(asks() === 1, `固件自开麦 → 补发 cmd=3（实得 ${asks()} 条）`);
+    ok(s.hostVoiceWanted === false, '补发不改 hostVoiceWanted（幽灵推流看护仍兜底关麦）');
+
+    // B：按住期间固件重复上报 106 → 边沿去重不重复补发
+    s._onData(mkCmd(106));
+    ok(asks() === 1, `重复 106 不重复补发（实得 ${asks()} 条）`);
+
+    // C：关麦（107）复位后，主机主动 askVoice 的 106 回应不追加补发
+    s._onData(mkCmd(107));
+    ok(s.micOn === false, '107 复位 micOn');
+    s.askVoice();
+    const base = asks(); // askVoice 自己那一条
+    s._onData(mkCmd(106));
+    ok(asks() === base, `主机发起的开麦回应不追加（实得 ${asks()}/${base}）`);
+    ok(s.hostVoiceWanted === true, '主机发起的 106 保持 hostVoiceWanted=true');
+    s.stop();
+  }
+
   console.log(`\n结果: ${pass} pass / ${fail} fail`);
   process.exit(fail ? 1 : 0);
 })();

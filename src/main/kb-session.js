@@ -276,8 +276,18 @@ class KeySession extends EventEmitter {
       return;
     }
     if (cmd === 106) {
+      const fromHost = this._pendingAskTs > 0;
+      // 固件自开麦（物理语音键触发、主机还没来得及发 cmd=3）：立即补发应答。
+      // 不补的后果：固件等不到官方软件回应，超时后自己注入 Win+R 输入
+      // rkgaming 下载网址引导装官方软件（烧在固件里的引流设计）。
+      // 覆盖盲区：普通模式功能键不走 cmd=159 上报、厂商码丢帧、会话瞬断恢复窗。
+      // 只在开麦边沿补一次（micOn 已 true 说明是重复通知），且不改 hostVoiceWanted——
+      // 普通模式收不到抬起码，保持 false 让幽灵推流看护兜底关麦
+      if (!fromHost && !this.micOn) {
+        this._write(3, [], 'ask-voice-late');
+      }
       this.micOn = true;
-      this.hostVoiceWanted = this._pendingAskTs > 0; // 106 是主机 askVoice 的回应还是固件自开麦
+      this.hostVoiceWanted = fromHost; // 106 是主机 askVoice 的回应还是固件自开麦
       this.emit('mic', { on: true, source: 'device' });
       return;
     }
