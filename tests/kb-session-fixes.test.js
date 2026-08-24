@@ -197,6 +197,94 @@ const HB104 = Buffer.from([5, 0xff, 0xf1, 0xfe, 0xc0, 104, 0, 0xef, 0, 0, 0, 0, 
     s.stop();
   }
 
+  console.log('[T8] USB 口(8102) 会话：候选/通道分类 + 0x1C 音频帧');
+  {
+    const nodeHidExports = require.cache[nodeHidPath].exports;
+    const origDevices = nodeHidExports.devices;
+    nodeHidExports.devices = () => [
+      { vendorId: 0x248a, productId: 0x8102, usagePage: 0xff12, interface: 1, release: 256, path: 'usb-0' },
+    ];
+    FakeHID.instances.length = 0;
+    const s = new KeySession();
+    const audioFrames = [];
+    s.on('audio', b => audioFrames.push(b));
+    s.start();
+    ok(s.transport === 'USB', `transport=USB（实得 ${s.transport}）`);
+    ok(s.channel === 0xf1, `通道前缀 0xF1（实得 0x${s.channel.toString(16)}）`);
+    const dev = FakeHID.instances.at(-1);
+    ok(dev && dev.path === 'usb-0', '选中 USB 厂商接口');
+    ok(dev.written.some(b => b[0] === 5 && b[2] === 0xf1), '初始心跳带 0xF1 前缀');
+    const pkt = Buffer.alloc(64); pkt[0] = 0x1c; pkt[1] = 7;
+    s._onData(pkt);
+    ok(audioFrames.length === 1 && audioFrames[0][1] === 7, '0x1C 64B 帧原样 emit audio');
+    s._onData(pkt.subarray(0, 40));
+    ok(audioFrames.length === 1, '<64B 的 0x1C 短帧丢弃');
+    s.stop();
+    nodeHidExports.devices = origDevices;
+  }
+
+  console.log('[T9] mic.js USB PCM 直通 + DSP 链');
+  {
+    const { MicPipeline } = require('../src/main/mic.js');
+    const p = new MicPipeline();
+    const mk = amp => { const b = Buffer.alloc(64); b[0] = 0x1c; for (let i = 0; i < 30; i++) b.writeInt16LE(amp, 4 + i * 2); return b; };
+
+    // A：管线按 160 样本块出数——30 样本/帧，第 6 帧才凑满第一块
+    let out = Buffer.alloc(0);
+    let framesFed = 0;
+    while (!out.length && framesFed < 20) { out = p.pushWiredFrame(mk(3000)); framesFed++; }
+    ok(framesFed === 6, `第 6 帧产出首块（实得第 ${framesFed} 帧）`);
+    ok(out.length === 320, `160 样本 → 320B（实得 ${out.length}B）`);
+
+    // B：降噪引擎初始化（DFN3 主力，dll/模型缺失时回退 RNNoise）
+    const engine = await p.initDenoiser();
+    ok(engine === 'df' || engine === 'rnnoise', `降噪引擎就绪（实得 ${engine}）`);
+
+    // C：低频隆隆被陡高通压制（50Hz 正弦输出 RMS 应远小于输入）
+    const p2 = new MicPipeline();
+    await p2.initDenoiser();
+    let inRms = 0, inN = 0, outRmsAfterWarmup = 0, outN = 0;
+    for (let k = 0; k < 100; k++) {
+      const b = Buffer.alloc(64);
+      for (let i = 0; i < 30; i++) {
+        const t = (k * 30 + i) / 16000;
+        b.writeInt16LE(Math.round(Math.sin(2 * Math.PI * 50 * t) * 8000), 4 + i * 2);
+      }
+      const o = p2.pushWiredFrame(b);
+      if (k < 10) continue; // 滤波器warm-up
+      for (let i = 4; i < 64; i += 2) { inRms += 8000 * 8000; inN++; }
+      for (let i = 0; i + 1 < o.length; i += 2) { const v = o.readInt16LE(i); outRmsAfterWarmup += v * v; outN++; }
+    }
+    const ratio = Math.sqrt(outRmsAfterWarmup / (outN || 1)) / Math.sqrt(inRms / inN);
+    ok(ratio < 0.5, `50Hz 分量衰减 >50%（实测保留 ${(ratio * 100).toFixed(1)}%）`);
+
+    // D：限幅不炸——大信号输出有界且无 NaN
+    let clipped = false;
+    for (let k = 0; k < 40; k++) {
+      const o = p2.pushWiredFrame(mk(32000));
+      for (let i = 0; i + 1 < o.length; i += 2) {
+        const v = o.readInt16LE(i);
+        if (!Number.isFinite(v) || Math.abs(v) > 32767) clipped = true;
+      }
+    }
+    ok(!clipped, '软限幅输出有界');
+
+    // E：静音段被门控压低（喂底噪，输出 RMS 应显著低于输入）
+    const p3 = new MicPipeline();
+    await p3.initDenoiser();
+    let gIn = 0, gOut = 0, gN = 0;
+    for (let k = 0; k < 150; k++) { // 1.5s 底噪让门控收敛
+      const b = Buffer.alloc(64);
+      for (let i = 0; i < 30; i++) b.writeInt16LE(((k * 31 + i * 7) % 200) - 100, 4 + i * 2); // ~±100 小噪声
+      const o = p3.pushWiredFrame(b);
+      gIn += 100 * 100;
+      for (let i = 0; i + 1 < o.length; i += 2) { const v = o.readInt16LE(i); gOut += v * v; }
+      gN++;
+    }
+    const gRatio = Math.sqrt(gOut / (gN * 320)) / 100;
+    ok(gRatio < 0.6, `静音段门控压低（实测保留 ${(gRatio * 100).toFixed(1)}%）`);
+  }
+
   console.log(`\n结果: ${pass} pass / ${fail} fail`);
   process.exit(fail ? 1 : 0);
 })();

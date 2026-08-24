@@ -1,12 +1,14 @@
-// 键盘命令会话维持器：命令口 PID 8243（usagePage 0xFF12）
-// 两种物理形态（官方 hid_section connectWay 逻辑逆向确认）：
-//   - 2.4G dongle 插 USB：枚举为 USB HID（interface>=0 且 release!=1），connectWay=2，写通道前缀 0xF0
-//   - 蓝牙连接：interface==-1 或 release==1，connectWay 降为 0，写通道前缀 0xF1
+// 键盘命令会话维持器：命令口 PID 8243（usagePage 0xFF12）+ USB 口 PID 8102
+// 三种物理形态：
+//   - 2.4G dongle 插 USB（枚举 8243）：interface>=0 且 release!=1，connectWay=2，写通道前缀 0xF0
+//   - 蓝牙连接（枚举 8243）：interface==-1 或 release==1，connectWay=0，写通道前缀 0xF1
+//   - USB 口（枚举 8102，dongle/线缆同 PID）：完整命令会话可用（2026-08-24 实机标定，
+//     推翻 protocol.md 早期「有线口零回应」结论——当时只试了 F0/dongle 通道），写通道前缀 0xF1
 // 协议（逆向自官方 RK-AI asar，tools/session6.js 已验证）：
-//   写帧(62B): 05 FF Fx FE C0 <cmd> <len> <data...> EF   （Fx=F1 蓝牙/有线、F0 2.4G dongle）
+//   写帧(62B): 05 FF Fx FE C0 <cmd> <len> <data...> EF   （Fx=F1 蓝牙/USB、F0 2.4G dongle）
 //   握手: 心跳5→104 → 发12+15(32B随机) → 227 → 发17+1(Open) → 在线
-//   开麦: cmd=3(AskVoice) → 106 + 0x1B音频流；关麦: cmd=4(StopVoice) → 107
-//   读帧同构（buf[5]=cmd），音频流 reportId=0x1B
+//   开麦: cmd=3(AskVoice) → 106 + 音频流；关麦: cmd=4(StopVoice) → 107
+//   读帧同构（buf[5]=cmd）；音频流：蓝牙 reportId=0x1B(SBC) / USB reportId=0x1C(16kHz PCM 直出)
 
 const { EventEmitter } = require('events');
 const { lookupKey, KEY_DEFS } = require('./keymap');
@@ -14,6 +16,7 @@ const kbdInject = require('./kbd-inject');
 
 const VID = 0x248a;
 const CMD_PID = 0x8243;
+const USB_PID = 0x8102; // USB 口（2.4G dongle 实测也枚举此 PID，非文档口径的 8243）
 const HANDSHAKE_TIMEOUT = 4000; // 开口后无握手回应即换口重试（无回应=键盘不在该口，判定与时长无关，短超时加快多口轮换）
 
 // vendor 官方 mi-hid 库（静态路径，按平台选择）
@@ -109,7 +112,7 @@ class KeySession extends EventEmitter {
     try {
       if (!this.binding) this.binding = loadBinding();
       const cands = this.binding.devices()
-        .filter(d => d.vendorId === VID && d.productId === CMD_PID && d.usagePage >= 0xff00);
+        .filter(d => d.vendorId === VID && (d.productId === CMD_PID || d.productId === USB_PID) && d.usagePage >= 0xff00);
       const devInfo = this._pick(cands);
       if (!devInfo) {
         // 全部候选都试过仍无回应：清空重来（键盘可能切换了连接模式）
@@ -118,9 +121,10 @@ class KeySession extends EventEmitter {
         this._scheduleReconnect();
         return;
       }
-      const bt = isBluetoothHid(devInfo);
-      this.transport = bt ? '蓝牙' : '2.4G-dongle';
-      this.channel = bt ? 0xf1 : 0xf0;
+      const isUsb = devInfo.productId === USB_PID;
+      const bt = !isUsb && isBluetoothHid(devInfo);
+      this.transport = isUsb ? 'USB' : (bt ? '蓝牙' : '2.4G-dongle');
+      this.channel = (bt || isUsb) ? 0xf1 : 0xf0; // USB 口实测只认 0xF1（0xF0 零回应）
       this.devPath = devInfo.path;
       this.dev = new this.binding.HID(devInfo.path);
       this.got104 = false;
@@ -205,6 +209,15 @@ class KeySession extends EventEmitter {
     // 蓝牙误码/截断的短帧不进解码器（否则出杂音）
     if (data[0] === 0x1b) {
       if (data.length < 62) return;
+      this.rx.audio++;
+      this.lastAudioTs = Date.now();
+      this.emit('audio', data);
+      return;
+    }
+    // USB 口音频流（reportId=0x1C，64B）：净荷即 16kHz int16 PCM（无需 SBC 解码），
+    // 原样上报，由上层按 rawPcm 消费
+    if (data[0] === 0x1c) {
+      if (data.length < 64) return;
       this.rx.audio++;
       this.lastAudioTs = Date.now();
       this.emit('audio', data);

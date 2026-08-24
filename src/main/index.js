@@ -105,8 +105,26 @@ if (!gotLock) {
 
 // 共享音频包处理：双连接（USB+蓝牙同时活跃）时同一帧可能两路各到一次，
 // 短窗去重后再解码，避免 PCM 翻倍速/杂音
-function onAudioPacket(buf) {
+let wiredPcmAccum = null;  // USB 口 PCM 攒批（凑 ≥240 样本再进 pcmBatch，对齐 BT 的批处理节奏）
+
+function onAudioPacket(buf, opts = {}) {
   try {
+    if (opts.rawPcm) {
+      // USB 口（0x1C 帧）：帧内已是 16kHz int16 PCM，跳过 SBC 解码直接进 DSP 链
+      if (buf.length < 64) return;
+      startPsBlocker();
+      flushMicPassthrough();
+      if (!micPipeline) micPipeline = new MicPipeline();
+      const chunk = micPipeline.pushWiredFrame(buf);
+      if (chunk.length) { // 管线内部按 160 样本块出数，不足时返回空
+        wiredPcmAccum = wiredPcmAccum ? Buffer.concat([wiredPcmAccum, chunk]) : chunk;
+        if (wiredPcmAccum.length >= 480) {
+          enqueuePcm(wiredPcmAccum);
+          wiredPcmAccum = null;
+        }
+      }
+      return;
+    }
     if (buf.length < 62) return;
     const key = buf[1] * 65536 + buf[2] + buf[3] * 256;
     const now = Date.now();
@@ -118,18 +136,23 @@ function onAudioPacket(buf) {
     flushMicPassthrough(); // 等音频流建立的透传 down：流已到，触发透传
 
     if (!micPipeline) micPipeline = new MicPipeline();
-    pcmBatch.push(micPipeline.pushPacket(buf));
-    if (!pcmBatchTimer) {
-      pcmBatchTimer = setTimeout(() => {
-        pcmBatchTimer = null;
-        if (pcmBatch.length && win && !win.isDestroyed()) {
-          win.webContents.send('mic-pcm', Buffer.concat(pcmBatch));
-        }
-        pcmBatch = [];
-      }, 120);
-    }
+    const chunk = micPipeline.pushPacket(buf);
+    if (chunk.length) enqueuePcm(chunk);
   } catch (e) {
     console.log('[mic] 解码失败:', e.message);
+  }
+}
+
+function enqueuePcm(chunk) {
+  pcmBatch.push(chunk);
+  if (!pcmBatchTimer) {
+    pcmBatchTimer = setTimeout(() => {
+      pcmBatchTimer = null;
+      if (pcmBatch.length && win && !win.isDestroyed()) {
+        win.webContents.send('mic-pcm', Buffer.concat(pcmBatch));
+      }
+      pcmBatch = [];
+    }, 120);
   }
 }
 
@@ -152,17 +175,20 @@ function boot() {
   cfg = config.load();
 
   watcher = new KeyboardWatcher();
-  watcher.on('key', onKey);
-  watcher.on('ai-mode', ({ on }) => onAiMode(on));
+  // USB 口（8102）会话在线时，watcher 与 session 打开的是同一个厂商接口，
+  // 同一份按键/AI 模式/麦克风报文会被两路各收一次 → 由 session 独占处理，watcher 让位
+  const usbSessionOwns = () => !!(session && session.connected && session.transport === 'USB');
+  watcher.on('key', e => { if (!usbSessionOwns()) onKey(e); });
+  watcher.on('ai-mode', ({ on }) => { if (!usbSessionOwns()) onAiMode(on); });
   watcher.on('device', ({ connected }) => {
     deviceConnected = connected;
     if (!connected) releasePassthrough(); // 有线拔出时透传按下的键兜底抬起
     if (win) win.webContents.send('device-status', connected);
   });
   // 有线口（8102）的音频流/麦克风状态同样进主管线（纯有线连接时语音才不至于静默失效）
-  watcher.on('audio', buf => onAudioPacket(buf));
+  watcher.on('audio', buf => { if (!usbSessionOwns()) onAudioPacket(buf); });
   watcher.on('mic', ({ on }) => {
-    if (win) win.webContents.send('mic-state', on);
+    if (!usbSessionOwns() && win) win.webContents.send('mic-state', on);
   });
   watcher.start();
 
@@ -180,7 +206,8 @@ function boot() {
     if (win) win.webContents.send('mic-state', on);
     if (!on) stopPsBlocker();
   });
-  session.on('audio', buf => onAudioPacket(buf));
+  // USB 口音频是原始 PCM（rawPcm），蓝牙/2.4G 是 SBC 编码——按 transport 分流
+  session.on('audio', buf => onAudioPacket(buf, { rawPcm: session.transport === 'USB' }));
   // 电量上报（cmd=208，键盘主动推）：徽章 + 托盘 tooltip + 低电量一次性通知
   session.on('battery', b => {
     if (win && !win.isDestroyed()) win.webContents.send('battery', b);
@@ -197,6 +224,13 @@ function boot() {
     }
   });
   session.start();
+
+  // 音频管线预热：降噪引擎异步初始化（未就绪期自动旁路，其余 DSP 照常）
+  micPipeline = new MicPipeline({ denoise: cfg.settings.denoiseEnabled !== false });
+  micPipeline.initDenoiser().then(engine => {
+    if (engine === 'df') console.log('[mic] DeepFilterNet3 降噪已就绪');
+    else if (engine === 'rnnoise') console.log('[mic] RNNoise 降噪已就绪（DFN3 回退）');
+  });
 
   // 普通（非 AI）模式（mac）：F1-F12/PrtSc 走标准报文进回注模块；绑定了动作的键在此拦截。
   // 返回 'block'=屏蔽原键、'passthrough'=动作+原键都触发、null=未绑定走原生回注
