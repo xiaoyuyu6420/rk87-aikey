@@ -37,9 +37,29 @@ let macroRec = null;        // 宏录制器（仅录制期间存在 5ms 轮询�
 let macroArmed = false;     // 录制期间：抑制绑定动作/开麦联动，绑定键强制透传（键状态可见才能录到）
 let soundWin = null;        // 打字音效隐藏页（0x0 常驻；关闭音效时不创建，零开销）
 
-// 常驻托盘应用：瞬时异常（如 stdout 管道断开的 EPIPE）不崩溃退出
+// 常驻托盘应用：瞬时异常（如 stdout 管道断开的 EPIPE）吞掉保活；
+// 但短窗内连续异常说明主进程已进坏状态 → 自动拉起新实例自愈。
+// （僵尸态的危害不止功能失灵：F10 长按无人应答 cmd=3，固件会走「Win+R 引导下载」）
+const CRASH_WINDOW_MS = 60 * 1000;
+const CRASH_MAX_IN_WINDOW = 3;
+let crashTimes = [];
 process.on('uncaughtException', e => {
   try { console.log('[uncaught]', e && e.message); } catch (_) {}
+  const now = Date.now();
+  crashTimes = crashTimes.filter(t => now - t < CRASH_WINDOW_MS);
+  crashTimes.push(now);
+  if (!isQuitting && crashTimes.length >= CRASH_MAX_IN_WINDOW) {
+    try { console.log('[uncaught] 短窗内连续异常，判定坏状态，自动重启'); } catch (_) {}
+    try { releaseDevices(); } catch (_) {} // app.exit 不走 before-quit，清理须手动
+    app.relaunch({ args: [...process.argv.slice(1), '--crash-restart'] });
+    app.exit(1);
+  }
+});
+
+// 渲染进程崩溃：托盘应用不能没 UI，重载窗口即可，不必整体重启
+app.on('render-process-gone', (_e, _wc, details) => {
+  try { console.log('[render-gone]', details && details.reason); } catch (_) {}
+  if (win && !win.isDestroyed()) win.webContents.reload();
 });
 
 // ---------- 文件日志 ----------
@@ -71,7 +91,16 @@ if (!gotLock) {
 } else {
   app.on('second-instance', () => showWindow());
   app.on('activate', () => showWindow()); // mac：点 Dock/应用图标重新弹设置窗口
-  app.whenReady().then(boot);
+  app.whenReady().then(boot).then(() => {
+    // 崩溃自启后的新实例：让用户知道刚才发生过异常重启（而非静默吞掉）
+    if (process.argv.includes('--crash-restart')) {
+      try {
+        const n = new Notification({ title: 'RK87 AIKey', body: '检测到异常退出，已自动重启' });
+        n.on('click', () => showWindow());
+        n.show();
+      } catch (_) {}
+    }
+  });
 }
 
 // 共享音频包处理：双连接（USB+蓝牙同时活跃）时同一帧可能两路各到一次，
@@ -801,8 +830,8 @@ ipcMain.handle('pick-program', async () => {
   return r.canceled ? null : r.filePaths[0];
 });
 
-app.on('before-quit', () => {
-  isQuitting = true;
+// 退出前统一清理（主动退出与崩溃自启共用）：停麦/落盘/掐孤儿 timer
+function releaseDevices() {
   stopPsBlocker();
   if (watcher) watcher.stop();
   if (session) session.stop(); // 推流中途退出会先补发 cmd=4 停麦再关句柄
@@ -810,4 +839,9 @@ app.on('before-quit', () => {
   if (fg) fg.stop();
   if (soundWin && !soundWin.isDestroyed()) soundWin.destroy(); // 音效隐藏页
   abortReplay(); // 掐掉宏回放孤儿 timer
+}
+
+app.on('before-quit', () => {
+  isQuitting = true;
+  releaseDevices();
 });
