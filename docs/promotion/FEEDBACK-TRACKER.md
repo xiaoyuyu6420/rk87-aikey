@@ -11,12 +11,14 @@
 |---|---|---|---|---|
 | GitHub Discussions | [discussions/13](https://github.com/xiaoyuyu6420/rk87-aikey/discussions/13) | 反馈征集帖（已发，建议置顶） | 0 | 主渠道，README 已引流 |
 | GitHub Issues | — | bug/feedback 模板已上线 | 0 | |
-| V2EX 分享创造 | 待发 | 文案见 PLAYBOOK.md 一 | 0 | |
-| 酷安 | 待发 | 文案见 PLAYBOOK.md 二 | 0 | |
-| 小红书 | 待发 | 文案见 PLAYBOOK.md 三 | 0 | |
-| B 站 | 待发 | 文案见 PLAYBOOK.md 四 | 0 | 视频 > 动态，优先视频 |
-| Reddit | 待发 | 文案见 PLAYBOOK.md 五 | 0 | 英文，可带国际用户 |
-| 少数派 / 即刻 | 待发 | 文案见 PLAYBOOK.md 六 | 0 | |
+| 科技爱好者周刊 | [投稿 #11363](https://github.com/ruanyf/weekly/issues/11363) | ✅ 已投稿（2026-08-26） | 0 | 阮一峰每周五从 issue 收录，等入选 |
+| HelloGitHub | [投稿 #3592](https://github.com/521xueweihan/HelloGitHub/issues/3592) | ✅ 已投稿（2026-08-26） | 0 | 月刊，等收录 |
+| V2EX 分享创造 | 待发 | 文案见 PLAYBOOK.md 一 | 0 | **最优先**：同款键盘用户最集中，需用户账号发布 |
+| 酷安 | 待发 | 文案见 PLAYBOOK.md 二 | 0 | 需用户账号发布 |
+| 小红书 | 待发 | 文案见 PLAYBOOK.md 三 | 0 | 需用户账号发布 |
+| B 站 | 待发 | 文案见 PLAYBOOK.md 四 | 0 | 视频 > 动态，需用户账号发布 |
+| Reddit | 待发 | 文案见 PLAYBOOK.md 五 | 0 | 英文，需用户账号发布 |
+| 少数派 / 即刻 | 待发 | 文案见 PLAYBOOK.md 六 | 0 | 需用户账号发布 |
 
 ## 反馈台账（每条一行）
 
