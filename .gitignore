@@ -5,3 +5,8 @@ _reversed/
 _reversed/.mimosa/
 *.log
 e2e/tmp-userdata*/
+
+# 本机测试证据与内部开发文档（含个人环境路径，不公开）
+e2e/evidence*/
+crucible/
+.zcode/

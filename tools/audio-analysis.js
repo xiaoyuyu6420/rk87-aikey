@@ -1,6 +1,6 @@
 // 分析桌面标定 WAV：底噪水平、频谱分布 → 判断降噪/增强空间
 const fs = require('fs');
-const file = 'C:/Users/67217_rvhs7p2/Desktop/rk87-wired-A-offset4.wav';
+const file = process.argv[2] || 'sample.wav';
 const buf = fs.readFileSync(file);
 const n = (buf.length - 44) >> 1;
 const x = new Int16Array(n);
