@@ -1,0 +1,39 @@
+name: 💬 使用反馈
+description: 说说不爽的地方、想要的功能——吐槽也欢迎
+title: "[反馈] "
+labels: ["feedback"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        我们正在收集 **200 份真实反馈**来决定下一步做什么。你的每一条都会被认真看。
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 反馈类型
+      options:
+        - 某个功能很好用 👍
+        - 某个功能不好用 / 看不懂 😕
+        - 想要新功能 💡
+        - 其他
+    validations:
+      required: true
+  - type: dropdown
+    id: feature
+    attributes:
+      label: 主要涉及
+      options:
+        - 功能键自定义映射
+        - 键盘麦克风 → 虚拟麦克风
+        - 打字统计
+        - 安装/连接过程
+        - 整体体验
+    validations:
+      required: true
+  - type: textarea
+    id: detail
+    attributes:
+      label: 具体说说
+      description: 好用在哪、难用在哪、你期望什么样？
+    validations:
+      required: true

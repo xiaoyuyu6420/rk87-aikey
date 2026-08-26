@@ -1,0 +1,48 @@
+name: 🐛 Bug 报告
+description: 功能不工作、崩溃、行为异常
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: 感谢反馈！写得越具体，修得越快。
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      options:
+        - Windows 10
+        - Windows 11
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+    validations:
+      required: true
+  - type: dropdown
+    id: conn
+    attributes:
+      label: 键盘连接方式
+      options:
+        - 有线 USB
+        - 蓝牙
+        - 2.4G 接收器
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么？
+      description: 期望的行为 vs 实际的行为。有截图/日志更好。
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 应用版本
+      description: 设置窗口标题或 Release 页可见，如 v0.10.2
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: 确认
+      options:
+        - label: 我已搜索过现有 Issue，没有重复
+          required: true

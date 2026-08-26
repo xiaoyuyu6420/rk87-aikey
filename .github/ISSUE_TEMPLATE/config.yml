@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 使用反馈 / 提问
+    url: https://github.com/xiaoyuyu6420/rk87-aikey/discussions
+    about: 不确定是不是 Bug？想聊聊使用体验？去 Discussions 更合适
+  - name: 📖 协议逆向文档
+    url: https://github.com/xiaoyuyu6420/rk87-aikey/blob/main/docs/protocol.md
+    about: 想了解键盘通信协议、自己动手适配其他型号
