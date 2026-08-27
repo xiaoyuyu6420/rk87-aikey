@@ -1,0 +1,41 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>xhs-3</title>
+<style>
+:root{--bg:#1a1d24;--amber:#f5a623;--cyan:#4fc3f7;--text:#e6e6e6;--dim:#6b7280;--card:#222632}
+*{margin:0;padding:0;box-sizing:border-box}
+body{width:1080px;height:1440px;background:var(--bg);font-family:"JetBrains Mono","Consolas","Menlo",monospace;color:var(--text);position:relative;overflow:hidden}
+.tag{position:absolute;top:64px;left:64px;font-size:26px;color:var(--cyan);letter-spacing:2px}
+.tag::before{content:"// ";color:var(--dim)}
+.title{position:absolute;top:140px;left:64px;right:64px;font-size:76px;font-weight:700;line-height:1.2}
+.title .hi{color:var(--amber)}
+.dl{position:absolute;top:400px;left:64px;right:64px;background:var(--card);border:1px solid #3a3d44;border-radius:18px;padding:40px}
+.dl h3{font-size:34px;margin-bottom:24px;color:var(--cyan)}
+.dl .row{display:flex;justify-content:space-between;align-items:center;padding:18px 0;border-bottom:1px dashed #3a3d44}
+.dl .row:last-child{border-bottom:none}
+.dl .row .l{font-size:26px}.dl .row .r{font-size:24px;color:var(--dim)}
+.dl .row .r.win{color:var(--cyan)}.dl .row .r.mac{color:var(--amber)}
+.fb{position:absolute;top:820px;left:64px;right:64px;background:rgba(245,166,35,0.08);border:1px solid var(--amber);border-radius:18px;padding:40px}
+.fb .badge{display:inline-block;background:var(--amber);color:#1a1d24;font-size:24px;font-weight:700;padding:6px 18px;border-radius:8px;margin-bottom:18px}
+.fb h3{font-size:40px;font-weight:700;margin-bottom:14px}
+.fb p{font-size:26px;color:var(--dim);line-height:1.5}
+.fb p .em{color:var(--text)}
+.code{position:absolute;bottom:150px;left:64px;font-family:monospace;font-size:22px;color:var(--dim);background:#0d0f14;padding:16px 24px;border-radius:8px;border-left:3px solid var(--cyan)}
+.bottom{position:absolute;bottom:64px;left:64px;right:64px;display:flex;justify-content:space-between;align-items:flex-end}
+.pname{font-size:30px;font-weight:700}.search{font-size:24px;color:var(--cyan)}
+</style></head><body>
+<div class="tag">下载 · 免费 · 开源</div>
+<div class="title">装上就能用<br><span class="hi">免安装 portable</span></div>
+<div class="dl">
+<h3>📦 去 Releases 下载</h3>
+<div class="row"><div class="l">Windows 免安装版</div><div class="r win">portable.exe ⬇</div></div>
+<div class="row"><div class="l">Windows 安装版</div><div class="r">Setup.exe</div></div>
+<div class="row"><div class="l">macOS Apple Silicon</div><div class="r mac">arm64.dmg</div></div>
+<div class="row"><div class="l">macOS Intel</div><div class="r mac">x64.dmg</div></div>
+</div>
+<div class="fb">
+<div class="badge">征集 200 份反馈</div>
+<h3>哪里难用？想要什么？</h3>
+<p>吐槽最有价值——<span class="em">缺啥功能评论区提</span>，点赞最高的先做</p>
+</div>
+<div class="code">$ git clone github.com/xiaoyuyu6420/rk87-aikey</div>
+<div class="bottom"><div class="pname">RK87 AIKey</div><div class="search">GitHub 搜 rk87-aikey</div></div>
+</body></html>

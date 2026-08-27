@@ -1,0 +1,29 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>xhs-2</title>
+<style>
+:root{--bg:#1a1d24;--amber:#f5a623;--cyan:#4fc3f7;--text:#e6e6e6;--dim:#6b7280;--card:#222632}
+*{margin:0;padding:0;box-sizing:border-box}
+body{width:1080px;height:1440px;background:var(--bg);font-family:"JetBrains Mono","Consolas","Menlo",monospace;color:var(--text);position:relative;overflow:hidden}
+.tag{position:absolute;top:64px;left:64px;font-size:26px;color:var(--cyan);letter-spacing:2px}
+.tag::before{content:"// ";color:var(--dim)}
+.title{position:absolute;top:140px;left:64px;right:64px;font-size:72px;font-weight:700;line-height:1.2}
+.title .hi{color:var(--cyan)}
+.cards{position:absolute;top:380px;left:64px;right:64px;display:flex;flex-direction:column;gap:32px}
+.fcard{background:var(--card);border:1px solid #3a3d44;border-radius:18px;padding:36px 40px;display:flex;gap:32px;align-items:center}
+.ico{font-size:64px;width:90px;text-align:center;flex-shrink:0}
+.ico.a{color:var(--amber)}.ico.c{color:var(--cyan)}.ico.g{color:#9ccc65}
+.body h3{font-size:36px;margin-bottom:12px;font-weight:700}
+.body p{font-size:24px;color:var(--dim);line-height:1.5}
+.body p .em{color:var(--text)}
+.bottom{position:absolute;bottom:64px;left:64px;right:64px;border-top:1px solid #3a3d44;padding-top:28px;text-align:center}
+.bottom .pname{font-size:30px;font-weight:700}
+.bottom .search{font-size:24px;color:var(--cyan);margin-top:10px}
+</style></head><body>
+<div class="tag">三个功能 · 开源免安装</div>
+<div class="title">不装官方软件<br>它能<span class="hi">替你做这些</span></div>
+<div class="cards">
+<div class="fcard"><div class="ico a">⌨️</div><div class="body"><h3>14 键随便映射</h3><p>启动程序 · 开网址 · 发快捷键，<span class="em">一键唤起 AI 助手</span></p></div></div>
+<div class="fcard"><div class="ico c">🎙️</div><div class="body"><h3>键盘麦克风共享</h3><p>变系统虚拟麦克风，<span class="em">微信语音/会议都能用</span></p></div></div>
+<div class="fcard"><div class="ico g">📊</div><div class="body"><h3>纯本地打字统计</h3><p>只记次数不记内容，<span class="em">不上传任何数据</span></p></div></div>
+</div>
+<div class="bottom"><div class="pname">RK87 AIKey · Win / macOS 双平台</div><div class="search">GitHub 搜 rk87-aikey</div></div>
+</body></html>

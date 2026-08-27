@@ -1,0 +1,30 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>xhs-1</title>
+<style>
+:root{--bg:#1a1d24;--amber:#f5a623;--cyan:#4fc3f7;--text:#e6e6e6;--dim:#6b7280}
+*{margin:0;padding:0;box-sizing:border-box}
+body{width:1080px;height:1440px;background:var(--bg);font-family:"JetBrains Mono","Consolas","Menlo",monospace;color:var(--text);position:relative;overflow:hidden}
+.tag{position:absolute;top:64px;left:64px;font-size:26px;color:var(--cyan);letter-spacing:2px}
+.tag::before{content:"// ";color:var(--dim)}
+.big{position:absolute;top:200px;left:64px;right:64px;font-size:96px;line-height:1.25;font-weight:700}
+.dead{color:var(--amber)}
+.keyboard{position:absolute;top:680px;left:64px;right:64px;display:flex;flex-direction:column;gap:10px}
+.row{display:flex;gap:8px;justify-content:center}
+.key{width:60px;height:60px;border-radius:8px;background:#2a2d34;border:1px solid #3a3d44;display:flex;align-items:center;justify-content:center;font-size:18px;color:var(--dim)}
+.key.hot{background:rgba(245,166,35,0.15);border-color:var(--amber);color:var(--amber);box-shadow:0 0 12px rgba(245,166,35,0.4)}
+.num{position:absolute;top:680px;left:0;right:0;text-align:center;font-size:280px;color:var(--amber);opacity:0.08;font-weight:900;line-height:1}
+.bottom{position:absolute;bottom:64px;left:64px;right:64px;border-top:1px solid #3a3d44;padding-top:28px}
+.pname{font-size:30px;color:var(--text);font-weight:700}
+.psub{font-size:22px;color:var(--dim);margin-top:8px}
+.search{position:absolute;bottom:64px;right:64px;font-size:24px;color:var(--cyan)}
+.search::before{content:"🔍 ";filter:grayscale(0)}
+</style></head><body>
+<div class="tag">痛点 · RK R87 Pro AI</div>
+<div class="big">你花钱买的<br>AI 键盘，有<span class="dead"> 14 个键</span><br>出厂就是死的。</div>
+<div class="num">14</div>
+<div class="keyboard">
+<div class="row"><div class="key hot">AI</div><div class="key hot">F1</div><div class="key hot">F2</div><div class="key hot">F3</div><div class="key hot">F4</div><div class="key hot">F5</div><div class="key hot">F6</div><div class="key hot">F7</div></div>
+<div class="row"><div class="key hot">F8</div><div class="key hot">F9</div><div class="key hot">F10</div><div class="key hot">F11</div><div class="key hot">F12</div><div class="key hot">PrtSc</div><div class="key">←</div><div class="key">→</div></div>
+</div>
+<div class="bottom"><div class="pname">RK87 AIKey</div><div class="psub">不装官方软件，这排键和麦克风全是摆设</div></div>
+<div class="search">GitHub 搜 rk87-aikey</div>
+</body></html>
