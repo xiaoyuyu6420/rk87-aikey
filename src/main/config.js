@@ -22,6 +22,11 @@ const DEFAULTS = {
     micPassMod: 'none',      // 语音键透传附加修饰键（none/ctrl/alt/shift；Windows 微信输入法
                              // 「按住说话」强制要求组合键，纯 F10 配不进去 → 选 ctrl 后在
                              // 微信里配 Ctrl+F10。仅 win32 生效，mac 无此限制）
+    remoteSafeMode: false,   // 远控防串键（仅 win32，需配合 micPassMod）：语音键透传主键改发
+                             // 冷门键码 F13（普通键盘没有此键），微信里配 Ctrl+F13。转发到
+                             // 被控端后修饰键退化也只可能是 F13，打不中远端任何常见配置；
+                             // UU远程「仅控制端响应的快捷键」白名单只收单键，加一条 F13 即可
+                             // 彻底不转发。仅影响语音触发键，其他绑定键透传不变
     denoiseEnabled: true,    // RNNoise 神经降噪 + DSP 增强链（高通/VAD 门控 AGC/软限幅）
     statsEnabled: true,      // 打字统计（只记每键计数与每日总数，纯本地 stats.json）
     fatigueEnabled: true,    // 疲劳提醒（连续打字满阈值弹系统通知）

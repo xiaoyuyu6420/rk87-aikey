@@ -15,6 +15,7 @@ const { MacroRecorder, replayMacro, abortReplay, trimSteps, RECORD_MAX_MS } = re
 const actions = require('./actions');
 const kbdInject = require('./kbd-inject');
 const config = require('./config');
+const { REMOTE_SAFE_KEY, REMOTE_SAFE_VK, passKeyNameOf } = require('./pt-alias');
 
 let tray = null;
 let win = null;
@@ -48,6 +49,10 @@ try {
     app.setPath('userData', portableData);
   }
 } catch (_) { /* 只读介质：保持默认路径 */ }
+
+// native 崩溃（koffi/HID 段错误等 JS 兜不住的）minidump 定点到 userData/Crashpad，
+// 配合已有的 logs/app.log 文件日志（见 boot 前的 console 落盘）做事后取证。
+try { app.setPath('crashDumps', path.join(app.getPath('userData'), 'Crashpad')); } catch (_) {}
 
 // 常驻托盘应用：瞬时异常（如 stdout 管道断开的 EPIPE）吞掉保活；
 // 但短窗内连续异常说明主进程已进坏状态 → 自动拉起新实例自愈。
@@ -210,6 +215,7 @@ function stopPsBlocker() {
 
 function boot() {
   initFileLog(); // 先于一切业务日志初始化
+  aliveMarkStart(); // silent-crash 检测：先看上次是否非正常死亡，再开始刷本次心跳
   // mac 菜单栏应用：Dock 不占位（点 x 关窗后只剩顶部状态栏图标；窗口随时可从托盘唤回）
   if (process.platform === 'darwin') app.dock.hide();
   cfg = config.load();
@@ -418,7 +424,7 @@ function onAiMode(on) {
 
 // 多连接（如 USB+蓝牙/2.4G 并存）时同一按键会从两个口各报一次，全局去重
 let lastGlobalKey = null;
-// 透传回注的 down 决定（keyId -> down 时是否已回注）。up 按记录执行，
+// 透传回注的 down 决定（keyId -> down 实际发出的键名；false=未回注）。up 按记录执行，
 // 防止按住期间修改配置导致 down/up 不配对、系统键状态卡住
 const ptDecision = new Map();
 
@@ -426,7 +432,10 @@ function onKey({ code, keyId, phase }) {
   const now = Date.now();
   if (lastGlobalKey && lastGlobalKey.keyId === keyId && lastGlobalKey.phase === phase && now - lastGlobalKey.ts < 80) return;
   lastGlobalKey = { keyId, phase, ts: now };
-  if (!aiModeOn) onAiMode(true); // cmd=159 到达 = 键盘实际处于 AI 模式（209 事件可能在启动前已错过）
+  // 注意：cmd=159 到达不能判定 AI 模式——蓝牙/2.4G 下普通模式按键同样走 159
+  // （2026-08-28 实测：普通模式按 F10 触发旧兜底误判进 AI，固件伴随的 209(0) 又
+  // 退出，徽章随每次语音键来回震荡）。模式状态唯一真源是 cmd=209：握手 cmd=12
+  // 与每 5 分钟电量查询都会带回一帧 209，丢帧后有周期自愈，无需按键侧兜底。
   const def = lookupKey(code) || { id: keyId, label: keyId };
   console.log(`[key] ${def.label} (${keyId}) ${phase}`);
   // 窗口隐藏到托盘时跳过：渲染端无人看，省掉每击键 2 条 IPC 唤醒 + DOM 高亮
@@ -485,19 +494,68 @@ function micPassModOf(keyId) {
   return (cfg.settings.micTriggerKeys || []).includes(keyId) ? m : null;
 }
 
+// 远控防串键：决策逻辑在 pt-alias.js（纯函数，单测覆盖）。
+function passKeyName(keyId) {
+  return passKeyNameOf(cfg.settings, keyId, process.platform === 'win32');
+}
+
+// 远控探针：F13 down 注入后短窗轮询异步键状态。LL 钩子吞掉的事件不会更新
+// GetAsyncKeyState——按住全程未见翻转 ⇒ 键盘流正被远程软件接管（全屏独占），
+// 本地收不到这个组合键。best-effort 提示，5 分钟至多弹一次。
+let probeTimer = null;
+let probeSeenDown = false;
+let probeArmedAt = 0;
+let probeLastNotify = 0;
+
+function armRemoteProbe() {
+  probeSeenDown = false;
+  probeArmedAt = Date.now();
+  clearInterval(probeTimer);
+  probeTimer = setInterval(() => {
+    if (actions.asyncKeyDown(REMOTE_SAFE_VK)) {
+      probeSeenDown = true;
+      clearInterval(probeTimer);
+      probeTimer = null;
+    }
+  }, 15);
+}
+
+function settleRemoteProbe() {
+  clearInterval(probeTimer);
+  probeTimer = null;
+  // 点按（down+up 间隔过短）采样不可信，不判定；正常「按住说话」必然长按
+  if (Date.now() - probeArmedAt < 150 || probeSeenDown) return;
+  if (Date.now() - probeLastNotify < 5 * 60 * 1000) return;
+  probeLastNotify = Date.now();
+  console.log('[passthrough] F13 注入未落地：键盘流疑似被远程软件接管（全屏独占），本地无法唤起');
+  try {
+    new Notification({
+      title: 'RK87 AIKey',
+      body: '语音键没反应：键盘输入正被远程软件接管。可切远控窗口模式，或在 UU远程「设置→键盘→仅控制端响应的快捷键」加入 F13',
+    }).show();
+  } catch (_) {}
+}
+
 function doPassDown(keyId, flags, pass) {
   const mod = micPassModOf(keyId);
   ptDecision.set(keyId, false);
   if (!pass) return;
   if (mod) actions.postRawKey(mod, true, 0);
-  if (actions.postRawKey(keyId, true, flags)) ptDecision.set(keyId, true);
+  // 记下实际发出的键名，up 按同名校验抬起（按住期间改配置也不会错配卡键）
+  const sent = passKeyName(keyId);
+  if (actions.postRawKey(sent, true, flags)) {
+    ptDecision.set(keyId, sent);
+    if (sent !== keyId) armRemoteProbe();
+  }
   else if (mod) actions.postRawKey(mod, false, 0); // 主键发失败：修饰立即回收，不留卡键
 }
 function doPassUp(keyId, flags) {
   const mod = micPassModOf(keyId);
-  if (ptDecision.get(keyId)) {
-    actions.postRawKey(keyId, false, flags);
+  const sent = ptDecision.get(keyId);
+  if (sent) {
+    actions.postRawKey(sent, false, flags);
     if (mod) actions.postRawKey(mod, false, 0);
+    if (sent !== keyId) settleRemoteProbe();
   }
   ptDecision.delete(keyId);
 }
@@ -555,9 +613,10 @@ function releasePassthrough() {
   for (const [, w] of ptMicWait) clearTimeout(w.timer);
   ptMicWait.clear();
   if (ptMicSettleTimer) { clearTimeout(ptMicSettleTimer); ptMicSettleTimer = null; }
-  for (const [keyId, injected] of ptDecision) {
-    if (injected) actions.postRawKey(keyId, false, 0);
-    if (injected) { const m = micPassModOf(keyId); if (m) actions.postRawKey(m, false, 0); }
+  clearInterval(probeTimer); probeTimer = null;
+  for (const [keyId, sent] of ptDecision) {
+    if (sent) actions.postRawKey(sent, false, 0);
+    if (sent) { const m = micPassModOf(keyId); if (m) actions.postRawKey(m, false, 0); }
   }
   ptDecision.clear();
 }
@@ -931,5 +990,32 @@ function releaseDevices() {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  aliveMarkClean();
   releaseDevices();
 });
+
+// silent-crash 检测：native 崩溃（koffi/node-hid 段错误）不经过任何 JS handler，
+// 进程直接消失，既有自启与日志都无从触发。兜底：每分钟刷心跳时间戳到 userData，
+// 正常退出打 clean 标；下次启动发现「心跳新鲜但无 clean 标」= 上次非正常死亡，
+// 弹一次通知让用户知道（配合 logs/app.log 与 Crashpad 的 minidump 可回溯现场）。
+function aliveMarkPath() { return path.join(app.getPath('userData'), 'alive.json'); }
+function aliveMarkClean() {
+  try { fs.writeFileSync(aliveMarkPath(), JSON.stringify({ clean: true, ts: Date.now() })); } catch (_) {}
+}
+function aliveMarkStart() {
+  const p = aliveMarkPath();
+  let prev = null;
+  try { prev = JSON.parse(fs.readFileSync(p, 'utf8')); } catch (_) {}
+  // 心跳 5 分钟内且无 clean 标：上次进程刚活过就没了（排除长关机/睡眠唤醒）
+  if (prev && !prev.clean && Date.now() - prev.ts < 5 * 60 * 1000) {
+    console.log('[alive] 检测到上次运行非正常退出（疑似 native 崩溃），现场见 logs/app.log 与 Crashpad/');
+    try {
+      new Notification({
+        title: 'RK87 AIKey',
+        body: '上次运行异常退出（可能闪退）。日志已保留在 logs/app.log，如反复出现请反馈该文件',
+      }).show();
+    } catch (_) {}
+  }
+  try { fs.writeFileSync(p, JSON.stringify({ clean: false, ts: Date.now() })); } catch (_) {}
+  setInterval(() => { try { fs.writeFileSync(p, JSON.stringify({ clean: false, ts: Date.now() })); } catch (_) {} }, 60 * 1000);
+}

@@ -12,11 +12,17 @@ const { shell } = require('electron');
 const IS_MAC = process.platform === 'darwin';
 
 // ---------- Windows: user32 SendInput ----------
+let user32Dll = null;
+function ensureUser32() {
+  if (user32Dll) return user32Dll;
+  const koffi = require('koffi');
+  user32Dll = koffi.load('user32.dll');
+  return user32Dll;
+}
 let SendInput = null;
 function ensureSendInput() {
   if (SendInput) return;
-  const koffi = require('koffi');
-  const user32 = koffi.load('user32.dll');
+  const user32 = ensureUser32();
   const KEYBDINPUT = koffi.struct('KEYBDINPUT', {
     wVk: 'uint16', wScan: 'uint16', dwFlags: 'uint32', time: 'uint32', dwExtraInfo: 'uint64',
   });
@@ -185,6 +191,21 @@ function postRawKey(name, down, flags) {
   }
 }
 
+// 异步键状态查询（远控探针用）：LL 钩子吞掉的事件不会更新异步键状态表，
+// 注入后状态从未翻转 ⇒ 键盘流正被远程软件接管。仅 win32，非 win 恒 false。
+let getAsyncKeyState = null;
+function asyncKeyDown(vk) {
+  if (IS_MAC) return false;
+  try {
+    if (!getAsyncKeyState) {
+      getAsyncKeyState = ensureUser32().func('int16 __stdcall GetAsyncKeyState(int vKey)');
+    }
+    return (getAsyncKeyState(vk) & 0x8000) !== 0;
+  } catch (_) {
+    return false;
+  }
+}
+
 // action 形状（config.json bindings 的值）：
 //   { type:'none' }
 //   { type:'app',    target:'C:/path/app.exe 或 xxx.bat', afterHotkey?, afterDelay? }
@@ -238,4 +259,4 @@ function scheduleAfter(action) {
 }
 
 // VK_KEYNAMES：按平台选好的「键名→键码」表（打字统计用它构建反向轮询表）
-module.exports = { run, sendHotkey, postRawKey, vkOf, setSysHandler, setMacroRunner, VK_KEYNAMES: VK };
+module.exports = { run, sendHotkey, postRawKey, asyncKeyDown, vkOf, setSysHandler, setMacroRunner, VK_KEYNAMES: VK };

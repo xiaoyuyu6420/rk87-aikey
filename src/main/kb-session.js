@@ -125,10 +125,12 @@ class KeySession extends EventEmitter {
       if (!devInfo) {
         // 全部候选都试过仍无回应：清空重来（键盘可能切换了连接模式）
         if (cands.length) this.triedPaths.clear();
+        this._absentStreak = (this._absentStreak || 0) + 1; // 设备缺席：退避计数（见 _scheduleReconnect）
         this.emit('state', { connected: false, reason: 'no-cmd-interface' });
         this._scheduleReconnect();
         return;
       }
+      this._absentStreak = 0; // 设备回来了：恢复常规节奏
       const isUsb = devInfo.productId === USB_PID;
       const bt = !isUsb && isBluetoothHid(devInfo);
       this.transport = isUsb ? 'USB' : (bt ? '蓝牙' : '2.4G-dongle');
@@ -179,8 +181,13 @@ class KeySession extends EventEmitter {
   _scheduleReconnect() {
     if (this.stopped) return;
     if (this.watchTimer) return;
-    // exclusive 撞墙指数退避：3s → 6s → 12s → 24s（上限），撞墙一次清一轮
-    const delay = 3000 * Math.pow(2, Math.min(this._openFailStreak, 3));
+    // 设备缺席（键盘睡眠/断开）时 3s 一轮的 HID.devices() 枚举+open 风暴有害无益：
+    // 高频枚举是 native 崩溃高发区（2026-08 另机闪退日志实锤：断线-重连循环中
+    // 进程无声消失、无 JS 异常），且刷爆日志。缺席退避 10s→20s→40s→60s 封顶；
+    // 开口撞墙（exclusive）保持原 3s→24s 节奏（设备在、只是句柄未释放）。
+    const delay = this._absentStreak
+      ? Math.min(10000 * Math.pow(2, this._absentStreak - 1), 60000)
+      : 3000 * Math.pow(2, Math.min(this._openFailStreak, 3));
     this.watchTimer = setTimeout(() => {
       this.watchTimer = null;
       this._open();
@@ -194,15 +201,23 @@ class KeySession extends EventEmitter {
     // 数据回调的递归 _readLoop 会对新设备发起第二个并发 read（node-hid 同步抛
     // "read is still running" = 未捕获异常）。
     const gen = this._gen;
-    this.dev.read((err, data) => {
-      if (this.stopped || gen !== this._gen) return;
-      if (err) {
-        this._onDisconnect('read-error: ' + (err.message || err));
-        return;
-      }
-      this._onData(data);
-      this._readLoop();
-    });
+    // read 发起也可能同步 throw（句柄已被延迟 close 关闭/设备即拔）：
+    // 在 HID 回调栈里抛出 = 未捕获异常进 native 边界，按断线处理走重连。
+    let pending;
+    try {
+      pending = this.dev.read((err, data) => {
+        if (this.stopped || gen !== this._gen) return;
+        if (err) {
+          this._onDisconnect('read-error: ' + (err.message || err));
+          return;
+        }
+        this._onData(data);
+        this._readLoop();
+      });
+    } catch (e) {
+      if (gen === this._gen && !this.stopped) this._onDisconnect('read-throw: ' + (e.message || e));
+    }
+    return pending;
   }
 
   _onData(data) {
