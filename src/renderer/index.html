@@ -2,15 +2,18 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'" />
   <title>RK87 AIKey</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+  <div class="aurora" aria-hidden="true"><i></i><i></i><i></i></div>
   <header>
     <div class="title">
       <h1>RK87 AIKey</h1>
-      <span id="device-status" class="badge">检测中…</span>
+      <div id="session-pill" class="session-pill" title="键盘链路状态">
+        <i class="dot"></i><span id="session-pill-text">检测中…</span>
+        <button id="session-reconnect" class="pill-btn" title="强制重建键盘会话（蓝牙半死/USB 抢读时用）" hidden>重连</button>
+      </div>
     </div>
     <div class="header-settings">
       <label><input type="checkbox" id="opt-autostart" /> 开机自启</label>
@@ -24,17 +27,29 @@
     </nav>
 
     <div id="page-keys">
-      <section class="hint">
+      <section class="hero" id="hero3d">
+        <div class="hero-canvas" id="hero-canvas"></div>
+        <div class="hero-title" id="hero-title" aria-hidden="true">
+          <h2>RK87 AIKey</h2>
+          <p>外设控制台 · AI 键盘</p>
+        </div>
+        <div class="hero-overlay">
+          <p class="hero-tip">拖拽旋转 · 点击发光的键直接配置</p>
+          <button id="view-toggle" class="ghost-btn">纯列表模式</button>
+        </div>
+      </section>
+
+      <section class="hint reveal">
         <p>① 按键盘上的「AI 切换」键进入/退出 AI 模式（F 行白灯亮） → ② 在下面对每个键配置动作 → ③ 按键即触发。</p>
         <p class="sub">两种模式各配各的：比如普通模式 F10 留给输入法语音，AI 模式 F10 绑开麦+勾「保留原按键功能」。tab 上的数字 = 该模式已自定义的键数（初次两份相同是旧配置复制，改过哪份哪份就独立了）。键盘实际处于哪个模式看右侧徽章。直接按键盘上的键，对应行会闪烁高亮。双击行名称可改备注名。</p>
       </section>
 
-      <section class="profile-bar">
+      <section class="profile-bar reveal">
         <div class="profile-chips" id="profile-chips"></div>
         <span class="sub" id="profile-hint">多套键位一键切换；双击档名重命名</span>
       </section>
 
-      <section class="mode-bar">
+      <section class="mode-bar reveal">
         <div class="mode-tabs">
           <button id="tab-fn" class="mode-tab active" data-mode="fn">普通模式</button>
           <button id="tab-ai" class="mode-tab" data-mode="ai">AI 模式</button>
@@ -45,7 +60,7 @@
 
       <div id="key-list"></div>
 
-      <section class="mic-card">
+      <section class="mic-card reveal">
       <div class="mic-head">
         <h2>前台应用自动切档 <small id="fg-platform-hint"></small></h2>
         <button id="rule-add" class="ghost-btn">＋ 添加规则</button>
@@ -54,7 +69,7 @@
       <p class="sub">按前台进程名（exe 名，不区分大小写）自动切换键位档；手动切档后，前台应用不变期间不会被自动接管。仅 Windows 支持自动检测，mac 请用托盘或按键手动切档。</p>
     </section>
 
-      <section class="mic-card" id="mic-card">
+      <section class="mic-card reveal" id="mic-card">
       <div class="mic-head">
         <h2>键盘麦克风 → 虚拟麦克风</h2>
         <label><input type="checkbox" id="opt-mic-bridge" /> 启用桥接</label>
@@ -87,7 +102,7 @@
       <p class="sub">装虚拟声卡（Win: VB-Cable vb-audio.com/Cable ／ Mac: BlackHole existential.audio，brew install blackhole-2ch）→ 勾「启用桥接」→ 播放设备选 CABLE Input / BlackHole 2ch → 按住开麦键说话。系统默认输入设备选 CABLE Output / BlackHole 2ch，任意软件即可当麦克风用。</p>
     </section>
 
-    <section class="mic-card">
+    <section class="mic-card reveal">
       <div class="mic-head">
         <h2>打字音效</h2>
         <label><input type="checkbox" id="opt-sound" /> 启用</label>
@@ -113,12 +128,13 @@
     </div>
 
     <div id="page-stats" hidden>
-    <section class="stats-card" id="stats-card">
+    <section class="stats-card reveal" id="stats-card">
       <div class="mic-head">
         <h2>打字统计</h2>
         <div class="stats-opts">
           <label title="连续打字满阈值弹系统提醒，停笔 1 分钟重新计时">疲劳提醒 <input type="checkbox" id="opt-fatigue" /></label>
           <input type="number" id="fatigue-min" min="5" max="120" step="5" style="width:52px" title="提醒阈值（分钟）" /> 分钟
+          <label title="远程操作本机时开启：暂停按键统计与轴体寿命累计（音效不受影响）"><input type="checkbox" id="opt-remote" /> 远控模式</label>
           <label><input type="checkbox" id="opt-stats" /> 启用统计</label>
           <button id="stats-report" class="ghost-btn">生成报告</button>
         </div>
@@ -133,8 +149,8 @@
           <div class="stats-topkeys" id="stats-topkeys"></div>
         </div>
         <div class="stats-week" id="stats-week"></div>
-        <div class="heatmap-title">今日键位热力图 <small>（悬停看次数，越亮按得越多）</small></div>
-        <div class="stats-heatmap" id="stats-heatmap"></div>
+        <div class="heatmap-title">今日键位热力图 <small>（3D 键盘点亮图，越亮按得越多，含修饰键）</small></div>
+        <div class="stats-kb3d" id="stats-kb3d"></div>
         <div class="heatmap-title">轴体寿命 <small>（按 5000 万次/键额定寿命估算，纯趣味）</small></div>
         <div id="switch-life" style="margin-bottom:6px"></div>
       </div>
@@ -143,6 +159,16 @@
     </div>
   </main>
 
-  <script src="app.js"></script>
+  <div id="key-modal" class="modal-mask" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <span id="modal-key-name" class="modal-key-name"></span>
+        <button id="modal-close" class="ghost-btn" title="关闭（Esc）">✕</button>
+      </div>
+      <div id="modal-row"></div>
+    </div>
+  </div>
+
+  <script type="module" src="./app.js"></script>
 </body>
 </html>

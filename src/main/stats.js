@@ -17,12 +17,14 @@ const FLUSH_AFTER_MS = 30 * 1000;   // 数据变更后 30s 落盘
 const FLUSH_EVERY_KEYS = 200;       // 累计 200 键落盘一次
 const KEEP_DAYS = 90;               // 只保留最近 90 天
 
-// 修饰键（左右码位在系统层是分开的，表里只有一份，打字统计无意义）与无字符功能键不统计
-const SKIP = new Set([
+// 音效黑名单：这些键计数（热力图要显示所有按键）但不发击键事件——
+// 产品文案「修饰键不响」。f13-f24 跳过轮询：与 mac 的 prtsc 等码位冲突，且实体不存在
+const NO_SOUND = new Set([
   'ctrl', 'shift', 'alt', 'option', 'win', 'cmd', 'command',
   'capslock', 'numlock', 'printscreen',
 ]);
-for (let i = 13; i <= 24; i++) SKIP.add(`f${i}`); // F13-F24 与 mac 的 prtsc 等码位冲突，且基本不产生字符
+const SKIP_POLL = new Set();
+for (let i = 13; i <= 24; i++) SKIP_POLL.add(`f${i}`);
 
 function localDate(d = new Date()) {
   const p = n => String(n).padStart(2, '0');
@@ -55,10 +57,19 @@ class TypingStats {
     this._lastEdgeTs = 0;   // 最近一次键边沿时刻（空闲降频判定）
     this._dayEndTs = 0;     // 当前日的午夜时刻（跨天检测，免每 tick 拼日期字符串）
     this._flushing = false; // 异步落盘进行中（防并发写）
+    // 轴体寿命：独立持久化 lifetime.json，不受 90 天裁剪影响，软件更新不丢
+    this.lifetime = { total: 0, keys: {} };
+    this._lifeDirty = false;
+    this._lifeFlushing = false;
+    this._lifeFailLogged = false;
   }
 
   statsPath() {
     return path.join(this.dir || app.getPath('userData'), 'stats.json');
+  }
+
+  lifetimePath() {
+    return path.join(this.dir || app.getPath('userData'), 'lifetime.json');
   }
 
   load() {
@@ -70,7 +81,29 @@ class TypingStats {
     this.trim();
     this.loaded = true;
     this.todayKey = localDate();
+    this.loadLifetime();
+    // 一次性迁移：lifetime.json 不存在 → 用 days 聚合值初始化（数字只增不减），
+    // 之后以 lifetime.json 为准增量累加
+    if (!fs.existsSync(this.lifetimePath())) {
+      for (const d of Object.values(this.days)) {
+        this.lifetime.total += d.total || 0;
+        for (const [name, count] of Object.entries(d.keys || {})) {
+          this.lifetime.keys[name] = (this.lifetime.keys[name] || 0) + count;
+        }
+      }
+      if (this.lifetime.total) this._lifeDirty = true; // 下次 flush 落盘
+    }
     return this;
+  }
+
+  // 轴体寿命载入：独立文件、独立结构，任何软件更新/90 天裁剪都不影响
+  loadLifetime() {
+    try {
+      const d = JSON.parse(fs.readFileSync(this.lifetimePath(), 'utf8'));
+      if (d && typeof d.total === 'number') {
+        this.lifetime = { total: d.total, keys: d.keys && typeof d.keys === 'object' ? d.keys : {} };
+      }
+    } catch (_) { /* 不存在或损坏：从零开始 */ }
   }
 
   // 载入时裁剪：删除 90 天窗口之外的日期（YYYY-MM-DD 零填充，可安全字典序比较）
@@ -103,7 +136,7 @@ class TypingStats {
   buildPollTable() {
     const byCode = new Map();
     for (const [name, code] of Object.entries(VK_KEYNAMES)) {
-      if (SKIP.has(name) || !Number.isInteger(code)) continue;
+      if (SKIP_POLL.has(name) || !Number.isInteger(code)) continue;
       if (!byCode.has(code)) byCode.set(code, name);
     }
     this.pollCodes = [];
@@ -151,6 +184,7 @@ class TypingStats {
     this.prev = null;
     this.started = false;
     this._flushSync(); // 退出路径同步落盘（app 退出不等异步 IO）
+    this._flushLifeSync(); // 轴体寿命同样同步落盘
   }
 
   tick() {
@@ -169,13 +203,14 @@ class TypingStats {
       if (down && !this.prev[i]) {
         this._lastEdgeTs = now;
         const name = this.pollNames[i];
-        if (this.onKeystroke) this.onKeystroke(name); // 音效等订阅方
-        if (this.counting) this.count(name);          // 统计关时只发事件不计数
+        if (this.onKeystroke && !NO_SOUND.has(name)) this.onKeystroke(name); // 音效订阅（修饰键不响）
+        if (this.counting) this.count(name);          // 计数全量：热力图显示所有按键
       }
       this.prev[i] = down;
     }
     // 防抖落盘：距最后一次变更满 30s
     if (this.dirty && now - this.lastDirtyTs >= FLUSH_AFTER_MS) this.flush();
+    this._dirtyTick();
     // 疲劳检测：停笔超 1 分钟断段
     if (this.streakStartTs && now - this.lastKeyPressTs > 60 * 1000) {
       this.streakStartTs = 0;
@@ -209,6 +244,10 @@ class TypingStats {
     d.keys[name] = (d.keys[name] || 0) + 1;
     this.dirty = true;
     this.lastDirtyTs = Date.now();
+    // 轴体寿命累计（独立 lifetime.json，不看 90 天窗口）
+    this.lifetime.total++;
+    this.lifetime.keys[name] = (this.lifetime.keys[name] || 0) + 1;
+    this._lifeDirty = true;
     const now = Date.now();
     this.lastKeyPressTs = now;
     if (!this.streakStartTs) this.streakStartTs = now; // 从闲到忙，开始新段
@@ -233,6 +272,29 @@ class TypingStats {
     } catch (e) { err = e; }
     this._flushing = false;
     if (err) this._flushFail(err);
+    this.flushLifetime(); // 天数落盘后顺手把 lifetime 也落盘（同一防抖节奏）
+  }
+
+  // 轴体寿命落盘（独立文件，异步）
+  async flushLifetime() {
+    if (!this._lifeDirty || this._lifeFlushing) return;
+    this._lifeFlushing = true;
+    const snapshot = JSON.stringify(this.lifetime);
+    this._lifeDirty = false;
+    const p = this.lifetimePath();
+    const tmp = p + '.tmp';
+    try {
+      await fsp.mkdir(path.dirname(p), { recursive: true });
+      await fsp.writeFile(tmp, snapshot, 'utf8');
+      await fsp.rename(tmp, p);
+    } catch (e) {
+      this._lifeDirty = true;
+      if (!this._lifeFailLogged) {
+        this._lifeFailLogged = true;
+        console.log('[stats] lifetime 落盘失败:', e && e.message);
+      }
+    }
+    this._lifeFlushing = false;
   }
 
   _flushFail(e) {
@@ -245,6 +307,25 @@ class TypingStats {
       this._failLogged = true;
       console.log('[stats] 落盘失败（60s 后重试）:', e && e.message);
     }
+  }
+
+  // 级联触发：stats 刷盘的同时把 lifetime 也刷（满 200 键的高频路径已由 flush() 级联）
+  _dirtyTick() {
+    if (this._lifeDirty && Date.now() - this.lastDirtyTs >= FLUSH_AFTER_MS) this.flushLifetime();
+  }
+
+  // 退出路径：同步落盘（before-quit 不等异步 IO，异步写会丢最后一次数据）
+  _flushLifeSync() {
+    if (!this._lifeDirty) return;
+    try {
+      const p = this.lifetimePath();
+      const dir = path.dirname(p);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      const tmp = p + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(this.lifetime), 'utf8');
+      fs.renameSync(tmp, p);
+      this._lifeDirty = false;
+    } catch (e) { /* 落盘失败不阻塞退出 */ }
   }
 
   // 退出路径：同步落盘（before-quit 不等异步 IO，异步写会丢最后一次数据）
@@ -282,16 +363,8 @@ class TypingStats {
       const ds = localDate(new Date(now.getFullYear(), now.getMonth(), now.getDate() - i));
       month.push({ date: ds, total: (this.days[ds] || {}).total || 0 });
     }
-    // 轴体寿命：全历史累计（每键 + 总数）。days 只留 90 天，累计口径即「近 90 天」，
-    // 对寿命估算足够（50M 次轴体寿命的万分之一级进度）
-    const lifetime = { total: 0, keys: {} };
-    for (const d of Object.values(this.days)) {
-      lifetime.total += d.total || 0;
-      for (const [name, count] of Object.entries(d.keys || {})) {
-        lifetime.keys[name] = (lifetime.keys[name] || 0) + count;
-      }
-    }
-    return { supported: this.supported, today: { total: today.total || 0, topKeys, keys: today.keys || {} }, week, month, lifetime };
+    // 轴体寿命：独立 lifetime.json 的全历史累计（不受 90 天裁剪/软件更新影响）
+    return { supported: this.supported, today: { total: today.total || 0, topKeys, keys: today.keys || {} }, week, month, lifetime: this.lifetime };
   }
 }
 

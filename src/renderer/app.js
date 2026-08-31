@@ -1,5 +1,8 @@
 // 设置页逻辑：键位列表 + 动作编辑 + 实时按键高亮标定
 
+import { createKeyboard3D } from './kb3d.js';
+import { animate, stagger } from '../../vendor/animejs/anime.esm.min.js';
+
 const TYPES = [
   { value: 'none',    label: '不动作' },
   { value: 'app',     label: '启动程序' },
@@ -15,20 +18,72 @@ let macroRecordingRow = null; // 正在录制宏的键行（超时自动停时�
 
 init();
 
+// ---------- 顶栏状态中心：●在线 · 通道 · RTT [重连] ----------
+// 把会话层的自愈过程（探测/换口/劣化重连）从暗箱变成可见：断线原因人话化
+const REASON_ZH = [
+  [/^probing/, '正在寻找键盘…'],
+  [/^no-cmd-interface/, '未发现键盘'],
+  [/^open-failed.*(already open|exclusive)/i, '设备句柄被占用，重试中'],
+  [/^open-failed/, '打开设备失败，重试中'],
+  [/^handshake-timeout\((.+)\)/, m => `${m[1]} 口无回应，换口中`],
+  [/^read-error|^read-throw/, '连接中断，重连中'],
+  [/^write-failed/, '链路写入失败，重连中'],
+  [/^heartbeat-lost/, '心跳丢失，重连中'],
+  [/^link-degraded|^audio-degraded/, '链路劣化，自动重连'],
+  [/^voice-stuck/, '语音流卡死，重连复位'],
+  [/^manual-reconnect/, '手动重连中'],
+];
+function reasonZh(r) {
+  if (!r) return '';
+  for (const [re, zh] of REASON_ZH) {
+    const m = r.match(re);
+    if (m) return typeof zh === 'function' ? zh(m) : zh;
+  }
+  return r.length > 24 ? r.slice(0, 24) + '…' : r;
+}
+
+function initStatusPill() {
+  const pill = document.getElementById('session-pill');
+  const pillText = document.getElementById('session-pill-text');
+  const btnReconnect = document.getElementById('session-reconnect');
+  const detail = {
+    online: !!state.sessionOnline, device: !!state.deviceConnected,
+    transport: '', rtt: 0, reason: '',
+  };
+  const render = () => {
+    const up = detail.online || detail.device;
+    pill.classList.toggle('on', !!up);
+    pill.classList.toggle('off', !up);
+    if (detail.online) {
+      const parts = ['在线'];
+      if (detail.transport) parts.push(detail.transport);
+      if (detail.rtt > 0) parts.push(`RTT ${detail.rtt}ms`);
+      pillText.textContent = parts.join(' · ');
+    } else if (detail.device) {
+      pillText.textContent = '键盘已连接 · 会话离线';
+    } else {
+      pillText.textContent = reasonZh(detail.reason) || '键盘未连接';
+    }
+    pill.title = detail.reason ? `原始状态：${detail.reason}` : '键盘链路状态';
+  };
+  window.aikey.onDeviceStatus(c => { detail.device = !!c; render(); });
+  window.aikey.onSessionStatus(on => { detail.online = !!on; render(); });
+  window.aikey.onSessionDetail(d => { Object.assign(detail, d); render(); });
+  btnReconnect.hidden = false; // 常显：蓝牙半死（在线但失灵）时 UI 直接重连，不用去托盘找
+  btnReconnect.onclick = () => {
+    btnReconnect.disabled = true;
+    btnReconnect.textContent = '重连中…';
+    window.aikey.reconnectSession();
+    // 主进程 state/detail 事件到达时会刷新胶囊；这里只兜底恢复按钮
+    setTimeout(() => { btnReconnect.disabled = false; btnReconnect.textContent = '重连'; }, 3000);
+  };
+  render();
+}
+
 async function init() {
   state = await window.aikey.getState();
 
-  const elStatus = document.getElementById('device-status');
-  // 键盘状态 = 有线连接 || 蓝牙/2.4G 命令会话在线（任一即视为已连接）
-  let devConnected = !!state.deviceConnected, sessOnline = !!state.sessionOnline;
-  const setDev = () => {
-    const c = devConnected || sessOnline;
-    elStatus.textContent = c ? '键盘已连接' : '键盘未连接';
-    elStatus.classList.toggle('on', !!c);
-  };
-  window.aikey.onDeviceStatus(c => { devConnected = c; setDev(); });
-  window.aikey.onSessionStatus(on => { sessOnline = on; setDev(); });
-  setDev();
+  initStatusPill();
 
   const optAuto = document.getElementById('opt-autostart');
   optAuto.checked = !!state.settings.autostart;
@@ -38,6 +93,9 @@ async function init() {
   initModeTabs();
   initProfiles();
   initPageNav();
+  initHero();
+  initModalShell();
+  initReveal();
 
   initMicBridge();
   initSound();
@@ -62,7 +120,6 @@ async function init() {
     row.classList.add('flash');
     setTimeout(() => row.classList.remove('flash'), 600);
   });
-
   console.log('[ui] init complete', state.profiles ? `档位 x${state.profiles.order.length}` : '');
 }
 
@@ -75,7 +132,7 @@ function initPageNav() {
       tabs.forEach(t => t.classList.toggle('active', t === tab));
       document.getElementById('page-keys').hidden = tab.dataset.page !== 'keys';
       document.getElementById('page-stats').hidden = tab.dataset.page !== 'stats';
-      if (tab.dataset.page === 'stats') refreshStats(); // 切进来立即刷新一次
+      if (tab.dataset.page === 'stats') { ensureStatsKb(); refreshStats(); } // 切进来立即刷新一次
     };
   });
 }
@@ -290,16 +347,100 @@ function initAppRules() {
 
 function renderList() {
   const list = document.getElementById('key-list');
+  closeKeyModal(); // 列表重建前归还浮层借出的行（无 modal 时空操作）
   list.innerHTML = '';
   for (const key of state.keys) {
     const binding = bindingsOf()[key.id] || { type: 'none' };
     list.appendChild(buildRow(key, binding));
   }
+  if (kb3d) kb3d.setConfigured(configuredIds());
+}
+
+function configuredIds() {
+  return Object.entries(bindingsOf())
+    .filter(([, b]) => b && b.type && b.type !== 'none')
+    .map(([id]) => id);
+}
+
+// ---------- 3D 首屏（WebGL 不可用时自动降级为纯列表） ----------
+let kb3d = null;
+let introPlayed = false; // 渲染层进程与托盘常驻进程同生命周期：每次 App 启动只播一次
+function initHero() {
+  const host = document.getElementById('hero-canvas');
+  const wantIntro = !introPlayed && !matchMedia('(prefers-reduced-motion: reduce)').matches;
+  introPlayed = true;
+  try {
+    kb3d = createKeyboard3D(host, { onKeyClick: openKeyModal, intro: wantIntro });
+    kb3d.setConfigured(configuredIds());
+    window.__kb3d = kb3d; // 调试/自动化验证钩子（projectKey/getConfigured/getRotation）
+  } catch (e) {
+    console.warn('[ui] 3D 首屏不可用，降级为列表', e);
+    document.getElementById('hero3d').hidden = true;
+    kb3d = null;
+    return;
+  }
+  if (wantIntro) playIntro();
+  const btn = document.getElementById('view-toggle');
+  btn.onclick = () => {
+    const hero = document.getElementById('hero3d');
+    const hide = !hero.hidden;
+    hero.hidden = hide;
+    btn.textContent = hide ? '返回 3D 首屏' : '纯列表模式';
+  };
+}
+
+// 开机时间线：标题逐字浮现（kb3d 内部同时做键帽逐键升起）
+function playIntro() {
+  const h2 = document.querySelector('#hero-title h2');
+  const sub = document.querySelector('#hero-title p');
+  if (!h2) return;
+  h2.innerHTML = h2.textContent.split('').map(c => `<span class="ch">${c}</span>`).join('');
+  animate('#hero-title .ch', {
+    opacity: [0, 1], translateY: [16, 0], filter: ['blur(6px)', 'blur(0px)'],
+    delay: stagger(40, { start: 150 }), duration: 650, ease: 'out(3)',
+  });
+  animate(sub, {
+    opacity: [0, .9], translateY: [10, 0],
+    delay: 700, duration: 600, ease: 'out(3)',
+  });
+  if (kb3d) kb3d.playIntro();
+}
+
+// ---------- 3D 键位点击 → 玻璃配置浮层（复用列表行 DOM，零逻辑重复） ----------
+function initModalShell() {
+  document.getElementById('modal-close').onclick = closeKeyModal;
+  document.getElementById('key-modal').addEventListener('click', e => {
+    if (e.target === e.currentTarget) closeKeyModal();
+  });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeKeyModal(); });
+}
+
+function openKeyModal(keyId) {
+  const row = document.querySelector(`#key-list .key-row[data-id="${keyId}"]`);
+  if (!row) return;
+  row._modalReturn = { parent: row.parentNode, next: row.nextSibling };
+  const def = state.keys.find(k => k.id === keyId);
+  document.getElementById('modal-key-name').textContent = def ? def.label : keyId;
+  document.getElementById('modal-row').appendChild(row);
+  document.getElementById('key-modal').hidden = false;
+}
+
+function closeKeyModal() {
+  const modal = document.getElementById('key-modal');
+  if (modal.hidden) return;
+  const row = document.querySelector('#modal-row .key-row');
+  if (row && row._modalReturn) {
+    row._modalReturn.parent.insertBefore(row, row._modalReturn.next);
+    row._modalReturn = null;
+  }
+  modal.hidden = true;
 }
 
 function buildRow(key, binding) {
   const row = document.createElement('div');
   row.className = 'key-row';
+  // 已配置的键带霓虹光点（与 3D 首屏「已配置发光」同一语言）
+  if (binding.type && binding.type !== 'none') row.classList.add('configured');
   row.dataset.id = key.id;
 
   // 键名（双击改名）
@@ -482,6 +623,7 @@ function buildRow(key, binding) {
   testBtn.textContent = '测试';
   testBtn.onclick = () => runRow(row, { silentFailToast: true });
   const saveBtn = document.createElement('button');
+  saveBtn.className = 'primary'; // 霓虹主按钮：全页唯一强彩色操作
   saveBtn.textContent = '保存';
   saveBtn.onclick = () => runRow(row, { save: true });
   actions.append(testBtn, saveBtn);
@@ -517,6 +659,8 @@ async function runRow(row, { save = false } = {}) {
   if (save) {
     await window.aikey.setBinding(row.dataset.id, action, currentMode);
     bindingsOf()[row.dataset.id] = action;
+    row.classList.toggle('configured', !!(action.type && action.type !== 'none'));
+    if (kb3d) kb3d.setConfigured(configuredIds()); // 3D 键盘同步发光
     updateTabCounts();
     toast(`已保存「${row.dataset.id}」（${currentMode === 'ai' ? 'AI 模式' : '普通模式'}）`);
     return; // 保存只保存，不执行；想看效果点「测试」
@@ -606,7 +750,14 @@ function toast(msg, isErr = false) {
 // ---------- 键盘麦克风 → 虚拟声卡桥接 ----------
 // 主进程把解码后的 PCM（int16 LE @16kHz 单声道，约 120ms 一批）发过来，
 // 这里经 WebAudio 播到用户选的输出设备（虚拟声卡的播放端，如 CABLE Input）。
-const bridge = { ctx: null, node: null, queue: [], chunkOff: 0, enabled: false, sinkId: '' };
+const bridge = { ctx: null, node: null, queue: [], chunkOff: 0, enabled: false, sinkId: '', underruns: 0, _logTs: 0, _undLogTs: 0 };
+// 桥接日志（限频 5s，force 绕过）经主进程落盘：微信输入法「唤不起/录到静音」类问题的唯一观测面
+function bridgeLog(msg, force) {
+  const now = Date.now();
+  if (!force && now - bridge._logTs < 5000) return;
+  bridge._logTs = now;
+  try { window.aikey.log('[bridge] ' + msg); } catch (_) {}
+}
 let micLevelTimer = null;
 
 async function initMicBridge() {
@@ -725,7 +876,11 @@ async function initMicBridge() {
   }
 
   window.aikey.onMicPcm(bytes => {
-    if (!bridge.enabled || !bytes.length) return;
+    if (!bridge.enabled || !bytes.length) {
+      // 桥未就绪但主进程还在推 PCM：语音「录到静音」的直接证据，留痕
+      if (bytes.length) bridgeLog(`PCM 丢弃：桥未就绪（enabled=${bridge.enabled}）`, true);
+      return;
+    }
     // int16 LE → float32
     const n = bytes.length >> 1;
     const f = new Float32Array(n);
@@ -737,6 +892,7 @@ async function initMicBridge() {
       if (a > peak) peak = a;
     }
     bridge.queue.push(f);
+    bridge.lastFeed = Date.now();
     // 防积压：超 5 帧（每帧 120ms 批 ≈ 600ms 缓冲）丢最旧。队首被丢弃时
     // chunkOff 必须归零——它指向的是旧队首的内部偏移，不重置会从新队首中间开始播（跳音）
     if (bridge.queue.length > 5) {
@@ -793,6 +949,9 @@ async function initMicBridge() {
       const opts = { sampleRate: 16000 };
       if (bridge.sinkId && bridge.sinkId !== 'default') opts.sinkId = bridge.sinkId;
       bridge.ctx = new AudioContext(opts);
+      const sinkLabel = selSink.selectedOptions[0] ? selSink.selectedOptions[0].textContent : bridge.sinkId;
+      bridgeLog(`启动：请求 16k 实际 ${bridge.ctx.sampleRate}Hz，sink=${sinkLabel}`, true);
+      bridge.ctx.onstatechange = () => bridgeLog(`AudioContext 状态 → ${bridge.ctx.state}`, true);
       const sp = bridge.ctx.createScriptProcessor(2048, 0, 1);
       sp.onaudioprocess = e => {
         const out = e.outputBuffer.getChannelData(0);
@@ -804,13 +963,24 @@ async function initMicBridge() {
           bridge.chunkOff += take; w += take;
           if (bridge.chunkOff >= chunk.length) { bridge.queue.shift(); bridge.chunkOff = 0; }
         }
-        if (w < out.length) out.fill(0, w); // 欠载时补静音
+        if (w < out.length) {
+          out.fill(0, w); // 欠载时补静音
+          // 欠载=输入法录到空洞。仅统计「音频刚流过」的窗口——纯静音期队列本就为空
+          if (bridge.lastFeed && Date.now() - bridge.lastFeed < 2000) {
+            bridge.underruns++;
+            if (Date.now() - bridge._undLogTs > 5000) {
+              bridge._undLogTs = Date.now();
+              bridgeLog(`缓冲欠载 ×${bridge.underruns}（队列=${bridge.queue.length}）`);
+            }
+          }
+        }
       };
       sp.connect(bridge.ctx.destination);
       bridge.node = sp;
       bridge.enabled = true;
       if (bridge.ctx.state === 'suspended') bridge.ctx.resume();
     } catch (e) {
+      bridgeLog(`桥接启动失败: ${e.message}`, true);
       toast('桥接启动失败: ' + e.message, true);
     }
   }
@@ -892,6 +1062,15 @@ function initStats() {
     await window.aikey.setSettings({ statsEnabled: opt.checked });
     refreshStats();
   };
+  // 远控模式：暂停按键统计与轴体寿命累计（远控转发的按键不算本机实打字）
+  const optRemote = document.getElementById('opt-remote');
+  optRemote.checked = !!state.settings.remoteStatsPause;
+  optRemote.onchange = () => {
+    state.settings.remoteStatsPause = optRemote.checked;
+    window.aikey.setSettings({ remoteStatsPause: optRemote.checked });
+    toast(optRemote.checked ? '远控模式：按键统计已暂停' : '已恢复按键统计');
+    refreshStats();
+  };
   // 每日打字报告：canvas 绘制分享卡片 → 保存 PNG
   document.getElementById('stats-report').onclick = async () => {
     let s;
@@ -967,8 +1146,8 @@ async function refreshStats() {
     topBox.appendChild(empty);
   }
 
-// 今日键位热力图（QWERTY 简化网格）
-  renderHeatmap(s.today.keys || {});
+  // 今日键位热力：3D 键盘逐键点亮（惰性创建：首次切到统计页才建 WebGL 上下文）
+  if (kbStats) kbStats.setHeat(s.today.keys || {});
 
   // 轴体寿命（累计 ÷ 单键 5000 万次额定寿命，趣味估算）
   renderSwitchLife(s.lifetime);
@@ -1081,15 +1260,27 @@ function drawReport(s) {
   });
   y += 262;
 
-  // 轴体寿命（最辛劳键）
+  // 轴体寿命：Top3 各自一条进度（每键 5000 万次额定寿命）
   const life = s.lifetime || { total: 0, keys: {} };
-  const hardKey = Object.entries(life.keys || {}).sort((a, b) => b[1] - a[1])[0];
+  const hardTop3 = Object.entries(life.keys || {}).sort((a, b) => b[1] - a[1]).slice(0, 3);
   g.fillStyle = '#e8eaf0'; g.font = '600 20px system-ui, sans-serif';
   g.fillText('轴体寿命', X, y);
   g.fillStyle = '#8b93a3'; g.font = '14px system-ui, sans-serif';
-  g.fillText(hardKey ? `累计 ${life.total.toLocaleString()} 次 · 最辛劳的是 ${keyLabel(hardKey[0])}（${(hardKey[1] / 50e6 * 100).toFixed(3)}%）`
-                     : `累计 ${life.total.toLocaleString()} 次`, X, y + 28);
-  y += 76;
+  g.fillText(`累计 ${life.total.toLocaleString()} 次`, X, y + 28);
+  y += 54;
+  const barMax = W - X * 2 - 220;
+  for (const [name, count] of hardTop3) {
+    const pct = count / 50e6 * 100;
+    g.fillStyle = '#8b93a3'; g.font = '15px system-ui, sans-serif';
+    g.fillText(keyLabel(name), X, y + 16);
+    g.fillStyle = '#2a2f3a'; g.beginPath(); g.roundRect(X + 90, y, barMax, 22, 11); g.fill();
+    g.fillStyle = '#4f8cff'; g.beginPath();
+    g.roundRect(X + 90, y, Math.max(22, barMax * pct / 100), 22, 11); g.fill();
+    g.fillStyle = '#e8eaf0'; g.font = '600 15px system-ui, sans-serif';
+    g.fillText(`${count.toLocaleString()} (${pct.toFixed(3)}%)`, X + 90 + barMax + 16, y + 16);
+    y += 52;
+  }
+  y += 18;
 
   // 底部落款
   g.fillStyle = '#555c6b'; g.font = '13px system-ui, sans-serif';
@@ -1097,16 +1288,7 @@ function drawReport(s) {
   return cv;
 }
 
-// ---------- 今日键位热力图 ----------
-// QWERTY 简化网格（键名与主进程统计名一致），宽键用 flex 拉伸
-const HEATMAP_ROWS = [
-  ['1','2','3','4','5','6','7','8','9','0','minus','equal'],
-  ['q','w','e','r','t','y','u','i','o','p','lbracket','rbracket'],
-  ['a','s','d','f','g','h','j','k','l','semicolon','quote'],
-  ['z','x','c','v','b','n','m','comma','period','slash'],
-  [{ n: 'tab', w: 1.6 }, { n: 'space', w: 5 }, { n: 'enter', w: 1.6 }, { n: 'backspace', w: 1.8 }],
-];
-// 轴体寿命：累计总击 + 最辛劳键的寿命进度条
+// 轴体寿命：每个键各自算（单键 5000 万次额定寿命），按使用量排前 5 名
 const SWITCH_LIFE = 50e6;
 function renderSwitchLife(life) {
   const box = document.getElementById('switch-life');
@@ -1117,47 +1299,55 @@ function renderSwitchLife(life) {
   cap.className = 'lifetime-total';
   cap.textContent = total ? `累计 ${total.toLocaleString()} 次` : '暂无累计数据（开始打字后出现）';
   box.appendChild(cap);
-  const top = total && Object.entries(life.keys || {}).sort((a, b) => b[1] - a[1])[0];
-  if (!top) return;
-  const pct = top[1] / SWITCH_LIFE * 100;
-  const row = document.createElement('div');
-  row.className = 'tk-row';
-  const name = document.createElement('span');
-  name.className = 'tk-name';
-  name.textContent = keyLabel(top[0]);
-  const bar = document.createElement('div');
-  bar.className = 'tk-bar';
-  bar.style.width = Math.max(3, Math.min(100, pct)) + '%';
-  const val = document.createElement('span');
-  val.className = 'tk-count';
-  val.textContent = `${top[1].toLocaleString()} 次 · ${pct.toFixed(3)}%`;
-  row.append(name, bar, val);
-  box.appendChild(row);
+  const entries = Object.entries(life?.keys || {}).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  if (!entries.length) return;
+  for (const [name, count] of entries) {
+    const pct = count / SWITCH_LIFE * 100;
+    const row = document.createElement('div');
+    row.className = 'tk-row';
+    const nm = document.createElement('span');
+    nm.className = 'tk-name';
+    nm.textContent = keyLabel(name);
+    const bar = document.createElement('div');
+    bar.className = 'tk-bar';
+    bar.style.width = Math.max(3, Math.min(100, pct)) + '%';
+    const val = document.createElement('span');
+    val.className = 'tk-count';
+    val.textContent = `${count.toLocaleString()} 次 · ${pct.toFixed(3)}%`;
+    row.append(nm, bar, val);
+    box.appendChild(row);
+  }
+}
+
+// 今日键位热力：惰性创建的 3D 键盘（首次切到统计页才占 WebGL 上下文）
+let kbStats = null;
+function ensureStatsKb() {
+  if (kbStats) return;
+  const host = document.getElementById('stats-kb3d');
+  if (!host) return;
+  try {
+    kbStats = createKeyboard3D(host, {}); // 只读展示：不接 onKeyClick
+  } catch (e) {
+    console.warn('[ui] 统计页 3D 热力不可用', e);
+    host.hidden = true;
+  }
 }
 
 function renderHeatmap(keys) {
-  const box = document.getElementById('stats-heatmap');
-  if (!box) return;
-  box.innerHTML = '';
-  const max = Math.max(1, ...Object.values(keys));
-  for (const row of HEATMAP_ROWS) {
-    const rowEl = document.createElement('div');
-    rowEl.className = 'hm-row';
-    for (const cell of row) {
-      const name = typeof cell === 'string' ? cell : cell.n;
-      const c = keys[name] || 0;
-      const el = document.createElement('span');
-      el.className = 'hm-key' + (c ? ' hot' : '');
-      el.textContent = keyLabel(name);
-      el.title = `${keyLabel(name)}：${c} 次`;
-      if (c) {
-        const a = Math.min(1, 0.18 + 0.82 * Math.sqrt(c / max)); // 平方根让低频也可见
-        el.style.background = `rgba(79,140,255,${a.toFixed(2)})`;
-        el.style.color = a > 0.55 ? '#fff' : '';
-      }
-      if (typeof cell !== 'string' && cell.w) el.style.flexGrow = cell.w;
-      rowEl.appendChild(el);
-    }
-    box.appendChild(rowEl);
+  if (kbStats) kbStats.setHeat(keys);
+}
+
+// ---------- 滚动入场编排：区块进入视口时加 .in 浮现（reduced-motion 直接显示） ----------
+function initReveal() {
+  const els = document.querySelectorAll('.reveal');
+  if (!('IntersectionObserver' in window) || matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    els.forEach(el => el.classList.add('in'));
+    return;
   }
+  const io = new IntersectionObserver(entries => {
+    for (const en of entries) {
+      if (en.isIntersecting) { en.target.classList.add('in'); io.unobserve(en.target); }
+    }
+  }, { threshold: .12 });
+  els.forEach(el => io.observe(el));
 }

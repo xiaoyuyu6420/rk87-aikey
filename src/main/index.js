@@ -156,7 +156,6 @@ function onAudioPacket(buf, opts = {}) {
       // USB 口（0x1C 帧）：帧内已是 16kHz int16 PCM，跳过 SBC 解码直接进 DSP 链
       if (buf.length < 64) return;
       startPsBlocker();
-      flushMicPassthrough();
       if (!micPipeline) micPipeline = new MicPipeline();
       const chunk = micPipeline.pushWiredFrame(buf);
       if (chunk.length) { // 管线内部按 160 样本块出数，不足时返回空
@@ -176,7 +175,6 @@ function onAudioPacket(buf, opts = {}) {
     audioDedup.push({ key, ts: now });
 
     startPsBlocker(); // 推流期防 App Nap 拖慢主进程 timer（pcmBatch/hbTimer）
-    flushMicPassthrough(); // 等音频流建立的透传 down：流已到，触发透传
 
     if (!micPipeline) micPipeline = new MicPipeline();
     const chunk = micPipeline.pushPacket(buf);
@@ -229,6 +227,7 @@ function boot() {
   watcher.on('device', ({ connected }) => {
     deviceConnected = connected;
     if (!connected) releasePassthrough(); // 有线拔出时透传按下的键兜底抬起
+    applyStatsCounting(); // 键盘离线 = 打字来自别的键盘，暂停 RK87 计数
     if (win) win.webContents.send('device-status', connected);
   });
   // 有线口（8102）的音频流/麦克风状态同样进主管线（纯有线连接时语音才不至于静默失效）
@@ -248,9 +247,12 @@ function boot() {
   session.on('ai-mode', ({ on }) => onAiMode(on));
   session.on('state', ({ connected, reason }) => {
     sessionOnline = connected;
+    sessionOfflineReason = connected ? '' : (reason || '');
     console.log(`[session] ${connected ? '在线' : '离线' + (reason ? '（' + reason + '）' : '')}`);
     if (!connected) releasePassthrough(); // 会话断开时透传按下的键兜底抬起
     if (win) win.webContents.send('session-status', connected);
+    pushSessionDetail(); // 状态条即时更新（RTT 等细节另有 2s 轮询）
+    applyStatsCounting(); // 会话掉线 = 打字来自别的键盘，暂停 RK87 计数
   });
   session.on('mic', ({ on }) => {
     if (win && !win.isDestroyed()) win.webContents.send('mic-state', on);
@@ -261,6 +263,12 @@ function boot() {
   });
   // USB 口音频是原始 PCM（rawPcm），蓝牙/2.4G 是 SBC 编码——按 transport 分流
   session.on('audio', buf => onAudioPacket(buf, { rawPcm: session.transport === 'USB' }));
+  // USB 口读写权仲裁：会话熔断（连续握手失败，疑似固件不支持 USB 会话）→ watcher
+  // 接管 8102 保住有线键监听；熔断解除/手动重连 → 收回给会话独占（抢读会掐死握手）
+  session.on('usb-block', ({ blocked }) => {
+    console.log(`[session] USB 口读写权 → ${blocked ? 'watcher 接管' : '会话独占'}`);
+    if (blocked) watcher.resumeUsb(); else watcher.suspendUsb();
+  });
   // 电量上报（cmd=208，键盘主动推）：徽章 + 托盘 tooltip + 低电量一次性通知
   session.on('battery', b => {
     if (win && !win.isDestroyed()) win.webContents.send('battery', b);
@@ -277,6 +285,10 @@ function boot() {
     }
   });
   session.start();
+
+  // 会话详情透出（设置页状态条）：链路通道/RTT/离线原因。RTT 无事件，
+  // 低频轮询读公开字段即可（纯内存读，开销可忽略）
+  setInterval(pushSessionDetail, 2000);
 
   // 音频管线预热：降噪引擎异步初始化（未就绪期自动旁路，其余 DSP 照常）
   micPipeline = new MicPipeline({ denoise: cfg.settings.denoiseEnabled !== false });
@@ -312,7 +324,7 @@ function boot() {
     enabled: cfg.settings.fatigueEnabled !== false,
     minutes: Math.max(5, Number(cfg.settings.fatigueMinutes) || 25),
   };
-  stats.counting = cfg.settings.statsEnabled !== false;
+  stats.counting = cfg.settings.statsEnabled !== false && cfg.settings.remoteStatsPause !== true;
   if (cfg.settings.statsEnabled !== false || cfg.settings.soundEnabled) stats.start();
 
   // 打字音效：击键边沿 → 隐藏页播放（窗口仅在启用时创建）
@@ -444,14 +456,20 @@ function onKey({ code, keyId, phase }) {
   }
   // 开麦键联动：按住 = 主动开麦，松开 = 关麦（键可在设置里勾选，默认 F10 + AI 键；空 = 全关）
   //（宏录制期间抑制：录宏不应触发语音推流）
-  let micAsked = false; // 开麦命令是否真正发出（离线时 false → 透传不等流）
   const micKeys = cfg.settings.micTriggerKeys || [];
   if (!macroArmed && micKeys.includes(keyId) && session) {
-    if (phase === 'down') micAsked = session.askVoice();
+    if (phase === 'down') session.askVoice();
     else session.stopVoice();
   }
   // cmd=159 厂商码只在 AI 模式上报 → 此路径一律用 AI 模式绑定集
   const binding = (cfg.bindingsAi && cfg.bindingsAi[keyId]) || { type: 'none' };
+  // 诊断（临时）：F10 透传链路取证
+  if (keyId === 'f10') {
+    console.log(`[kdbg] f10 ${phase} aiMode=${aiModeOn} binding=${JSON.stringify(binding)} ` +
+      `pass=${macroArmed || binding.passthrough === true || binding.type === 'none'} ` +
+      `micKey=${micKeys.includes(keyId)} session=${!!session} connected=${session ? session.connected : '-'} ` +
+      `micPassMod=${cfg.settings.micPassMod} remoteSafe=${!!cfg.settings.remoteSafeMode}`);
+  }
   // 动作只在按下触发（宏录制期间抑制动作执行）
   if (phase === 'down' && binding.type !== 'none' && !macroArmed) {
     const result = actions.run(binding);
@@ -462,22 +480,17 @@ function onKey({ code, keyId, phase }) {
   // 透传：未绑定任何动作（完全原生）、勾了透传、或宏录制中（强制——AI 模式厂商码
   // 路径的系统键状态由本应用回注合成，不透传则 GetAsyncKeyState 看不到，录不进宏）
   //（回注让用户在目标窗口看到真实输入反馈，一举两得）
-  passthroughKey(keyId, phase, macroArmed || binding.passthrough === true || binding.type === 'none', micAsked);
+  passthroughKey(keyId, phase, macroArmed || binding.passthrough === true || binding.type === 'none');
 }
 
 // 透传回注（AI 模式厂商码路径）。down 时记下决定，up 按记录执行；
 // 无键码的键（AI 键/扩展键位，无原功能可言）发送失败不记状态。
-// 麦克风触发键的 down 透传等音频流真正建立（事件驱动）：
-//   固件开麦→PCM 推流耗时随蓝牙状态浮动（实测数百 ms 且方差大），固定延迟
-//   既可能不够（输入法录到开头静音=「检测不到麦克风」）也可能太长。
-//   现在：开麦命令发出后，等第一包音频帧到达（再留 200ms 给 renderer 桥消费），
-//   或 PT_MIC_TIMEOUT 超时兜底；流本就活跃则立即透传。会话离线（命令没发出）
-//   时不等待，立即透传，保持点击语义。
-// 快速点按（流未到就松开）则立即补发 down+up，语义不丢。
-const PT_MIC_TIMEOUT = 1500;  // ms：等音频流建立的兜底上限（超时保 F10 语义）
-const PT_MIC_SETTLE = 200;    // ms：首帧到达后给 renderer 桥开始消费的余量
-const ptMicWait = new Map();  // keyId -> { timer }（等待音频流建立的透传 down）
-let ptMicSettleTimer = null;  // 首帧到达后的统一 flush 定时器
+// 麦克风触发键的 down 透传**立即发出**，不再等音频流建立：
+//   旧设计等首帧 PCM（1.5s 兜底）是怕输入法「检测不到麦克风」，但等待吃掉了长按
+//   语义——固件开麦到推流常超 1.5s，按住不足 1.5s 就松键会被降级成瞬时点击，
+//   微信「长按唤醒语音」失效（实测「隔一段时间 F10 唤不醒」即此：短语音全灭）。
+//   现在立即透传；开头静音由 renderer 桥的欠载补零兜底（虚拟声卡始终有流）。
+//   若微信复现「检测不到麦克风」，换方案：透传后向桥预注静音帧。
 
 function currentPassFlags() {
   return process.platform === 'darwin' ? kbdInject.currentModFlags() : 0;
@@ -539,15 +552,20 @@ function settleRemoteProbe() {
 function doPassDown(keyId, flags, pass) {
   const mod = micPassModOf(keyId);
   ptDecision.set(keyId, false);
-  if (!pass) return;
-  if (mod) actions.postRawKey(mod, true, 0);
-  // 记下实际发出的键名，up 按同名校验抬起（按住期间改配置也不会错配卡键）
+  if (!pass) { console.log(`[kdbg2] ${keyId} doPassDown 跳过（pass=false）`); return; }
+  if (mod) {
+    const okMod = actions.postRawKey(mod, true, 0);
+    console.log(`[kdbg2] ${keyId} 修饰键 ${mod} down → ${okMod}`);
+  }
   const sent = passKeyName(keyId);
-  if (actions.postRawKey(sent, true, flags)) {
+  const ok = actions.postRawKey(sent, true, flags);
+  console.log(`[kdbg2] ${keyId} 主键 ${sent} down → ${ok}`);
+  if (ok) {
     ptDecision.set(keyId, sent);
     if (sent !== keyId) armRemoteProbe();
+  } else if (mod) {
+    actions.postRawKey(mod, false, 0); // 主键发失败：修饰立即回收，不留卡键
   }
-  else if (mod) actions.postRawKey(mod, false, 0); // 主键发失败：修饰立即回收，不留卡键
 }
 function doPassUp(keyId, flags) {
   const mod = micPassModOf(keyId);
@@ -555,64 +573,27 @@ function doPassUp(keyId, flags) {
   if (sent) {
     actions.postRawKey(sent, false, flags);
     if (mod) actions.postRawKey(mod, false, 0);
+    if ((cfg.settings.micTriggerKeys || []).includes(keyId)) {
+      console.log(`[passthrough] ${keyId} → ${sent} up`);
+    }
     if (sent !== keyId) settleRemoteProbe();
   }
   ptDecision.delete(keyId);
 }
 
-function flushMicPassthrough() {
-  // 音频帧已到：所有等待中的 mic 透传 down 再留一个消费余量后统一发出
-  if (!ptMicWait.size || ptMicSettleTimer) return;
-  ptMicSettleTimer = setTimeout(() => {
-    ptMicSettleTimer = null;
-    const flags = currentPassFlags();
-    for (const [keyId, w] of ptMicWait) {
-      clearTimeout(w.timer);
-      ptMicWait.delete(keyId);
-      doPassDown(keyId, flags, true);
-    }
-  }, PT_MIC_SETTLE);
-}
-
-function cancelMicWait(keyId) {
-  const w = ptMicWait.get(keyId);
-  if (w) { clearTimeout(w.timer); ptMicWait.delete(keyId); }
-}
-
 function passthroughKey(keyId, phase, pass, micAsked) {
+  console.log(`[kdbg2] passthroughKey ${keyId} ${phase} pass=${pass} micAsked=${micAsked}`);
   const flags = currentPassFlags();
   if (phase === 'down') {
-    if (pass && micAsked) {
-      // 开麦键：等音频流建立再透传（流已活跃=虚拟声卡已在出声 → 立即透传）
-      const audioLive = session && session.lastAudioTs && Date.now() - session.lastAudioTs < 300;
-      if (audioLive) { doPassDown(keyId, flags, pass); return; }
-      const t = setTimeout(() => {
-        // 超时兜底：流始终没来（固件没开麦/丢包），保 F10 语义照常透传
-        const w = ptMicWait.get(keyId);
-        if (w && w.timer === t) ptMicWait.delete(keyId);
-        if (ptMicSettleTimer) { /* settle flush 不会再带上这个键（已删） */ }
-        doPassDown(keyId, currentPassFlags(), true);
-      }, PT_MIC_TIMEOUT);
-      ptMicWait.set(keyId, { timer: t });
-      return;
-    }
+    // 开麦键（micAsked）与普通透传键一律立即注入：长按唤醒的按住时长必须原样保真
     doPassDown(keyId, flags, pass);
   } else {
-    if (ptMicWait.has(keyId)) { // 流未到就松开：立即补发 down+up，保持点击语义
-      cancelMicWait(keyId);
-      doPassDown(keyId, flags, true); // 能进等待队列的必是透传键
-      doPassUp(keyId, flags);
-      return;
-    }
     if (ptDecision.has(keyId)) doPassUp(keyId, flags);
   }
 }
 
-// 断线/停止兜底：清等待队列，把透传已按下的键全部抬起，避免系统键状态卡住
+// 断线/停止兜底：把透传已按下的键全部抬起，避免系统键状态卡住
 function releasePassthrough() {
-  for (const [, w] of ptMicWait) clearTimeout(w.timer);
-  ptMicWait.clear();
-  if (ptMicSettleTimer) { clearTimeout(ptMicSettleTimer); ptMicSettleTimer = null; }
   clearInterval(probeTimer); probeTimer = null;
   for (const [keyId, sent] of ptDecision) {
     if (sent) actions.postRawKey(sent, false, 0);
@@ -694,6 +675,8 @@ function sendSoundConfig() {
 }
 
 ipcMain.on('sound-log', (_e, msg) => console.log('[sound]', msg));
+// 渲染端观测日志（麦克风桥接等静默链路）统一落盘，便于「时灵时不灵」类问题回溯
+ipcMain.on('renderer-log', (_e, msg) => console.log('[renderer]', msg));
 
 ipcMain.handle('sound-test', () => {
   if (!soundWin || soundWin.isDestroyed()) return { ok: false };
@@ -751,6 +734,16 @@ function createTray() {
   tray.on('double-click', () => showWindow());
 }
 
+// 统计计数开关的统一入口：统计开关 与 远控模式 与 键盘在线 相与。
+// 键盘离线（未发现键盘）= 当前打字来自别的键盘，不计入 RK87 的热力/寿命
+function applyStatsCounting() {
+  if (!stats) return;
+  const kbOnline = deviceConnected || sessionOnline;
+  stats.counting = cfg.settings.statsEnabled !== false
+    && cfg.settings.remoteStatsPause !== true
+    && kbOnline;
+}
+
 function rebuildTrayMenu() {
   const menu = Menu.buildFromTemplate([
     { label: '打开设置', click: () => showWindow() },
@@ -764,6 +757,11 @@ function rebuildTrayMenu() {
       checked: id === cfg.profiles.activeId,
       click: () => manualSwitch(id),
     })) },
+    { label: '远控模式（暂停按键统计）', type: 'checkbox', checked: !!(cfg.settings && cfg.settings.remoteStatsPause), click: mi => {
+      cfg.settings.remoteStatsPause = mi.checked;
+      config.save(cfg);
+      applyStatsCounting();
+    } },
     { label: '打开日志文件夹', click: () => shell.openPath(path.join(app.getPath('userData'), 'logs')) },
     { label: '退出官方 RK-AI', click: () => { exitOfficialRKAI(); } },
     { label: '开机自启', type: 'checkbox', checked: !!(cfg.settings && cfg.settings.autostart), click: mi => {
@@ -776,6 +774,20 @@ function rebuildTrayMenu() {
   ]);
   tray.setContextMenu(menu);
   tray.setToolTip('RK87 AIKey — 自定义功能键');
+}
+
+let sessionOfflineReason = '';
+// 状态中心数据帧：在线 = 通道 + RTT；离线 = 最近一次断开原因（重连探测中会被
+// _emitOffline 的 'probing'/'no-cmd-interface' 覆盖，正好表达"在找键盘"）
+function pushSessionDetail() {
+  if (!win || win.isDestroyed()) return;
+  win.webContents.send('session-detail', {
+    online: sessionOnline,
+    device: deviceConnected,
+    transport: session ? session.transport : '',
+    rtt: session ? Math.round(session.rttAvg || 0) : 0,
+    reason: sessionOfflineReason,
+  });
 }
 
 function showWindow() {
@@ -794,6 +806,7 @@ function showWindow() {
       preload: path.join(__dirname, '..', 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      webSecurity: false, // 见 loadFile 处注释：本地 ES module 链需要
       // 窗口隐藏到托盘是常态：禁用后台节流，保证 renderer 音频桥/IPC 投递
       // 不被 Chromium 的 hidden-page 定时器对齐拖慢（实验实测 Electron 33 下
       // AudioContext 不受影响，此为低成本保险）
@@ -801,6 +814,13 @@ function showWindow() {
     },
   });
   win.setMenuBarVisibility(false);
+  // 渲染层 console 转发：module 链（app→kb3d→three）加载失败时主进程可见
+  win.webContents.on('console-message', (_e, level, message, line, sourceId) => {
+    if (level >= 1) console.log(`[renderer:${level}] ${message} (${sourceId}:${line})`);
+  });
+  // file:// 下 ES module import 需要 webSecurity 关闭（file origin 为 null，module
+  // 的 CORS 模式 fetch 会被拦）。本应用渲染层不加载任何远程内容，contextIsolation
+  // 仍开启，安全取舍可接受——3D 首屏的 module 链（app→kb3d→vendor/three）依赖此开关
   win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
   win.on('close', e => {
     // 关窗 = 隐藏到托盘；真正退出走托盘「退出」（isQuitting 放行）
@@ -814,6 +834,7 @@ function showWindow() {
     win.webContents.send('device-status', deviceConnected);
     win.webContents.send('session-status', sessionOnline);
     win.webContents.send('ai-mode', aiModeOn);
+    pushSessionDetail();
   });
 }
 
@@ -856,10 +877,14 @@ ipcMain.handle('set-settings', (_e, settings) => {
   // 降噪开关：即时生效（旁路/恢复引擎），无需重启
   if ('denoiseEnabled' in settings && micPipeline) micPipeline.setDenoise(settings.denoiseEnabled !== false);
   if ('statsEnabled' in settings && stats) {
-    stats.counting = settings.statsEnabled !== false;
+    applyStatsCounting();
     // 统计关但音效开：轮询保持（keystroke 事件源不能断）；两者都关才停
     if (stats.counting || cfg.settings.soundEnabled) stats.start();
     else stats.stop();
+  }
+  if ('remoteStatsPause' in settings) {
+    applyStatsCounting();
+    rebuildTrayMenu(); // 托盘勾选态同步
   }
   if ('soundEnabled' in settings) {
     if (settings.soundEnabled) { createSoundWindow(); sendSoundConfig(); }
@@ -887,6 +912,9 @@ ipcMain.handle('stats-get', () => {
   const enabled = cfg.settings.statsEnabled !== false;
   return stats ? { ...stats.summary(), enabled } : { supported: false, enabled };
 });
+
+// 手动重连（设置页状态条按钮）：与托盘「重连键盘」同一入口
+ipcMain.handle('session-reconnect', () => { if (session) session.reconnect(); });
 
 ipcMain.handle('mic-control', (_e, on) => {
   if (!session) return { ok: false, error: '会话未初始化' };

@@ -12,6 +12,9 @@ contextBridge.exposeInMainWorld('aikey', {
   onMicPcm: cb => ipcRenderer.on('mic-pcm', (_e, buf) => cb(new Uint8Array(buf))),
   onMicState: cb => ipcRenderer.on('mic-state', (_e, on) => cb(on)),
   onSessionStatus: cb => ipcRenderer.on('session-status', (_e, on) => cb(on)),
+  // 会话详情（状态条：在线/通道/RTT/离线原因）+ 手动重连
+  onSessionDetail: cb => ipcRenderer.on('session-detail', (_e, d) => cb(d)),
+  reconnectSession: () => ipcRenderer.invoke('session-reconnect'),
   onAiMode: cb => ipcRenderer.on('ai-mode', (_e, on) => cb(on)),
   onBattery: cb => ipcRenderer.on('battery', (_e, b) => cb(b)),
   micControl: on => ipcRenderer.invoke('mic-control', on),
@@ -27,4 +30,6 @@ contextBridge.exposeInMainWorld('aikey', {
   // 打字统计
   statsGet: () => ipcRenderer.invoke('stats-get'),
   saveReportPng: dataUrl => ipcRenderer.invoke('save-report', dataUrl),
+  // 渲染端日志落盘（桥接等静默链路的观测，进主进程 app.log）
+  log: msg => ipcRenderer.send('renderer-log', String(msg).slice(0, 300)),
 });
