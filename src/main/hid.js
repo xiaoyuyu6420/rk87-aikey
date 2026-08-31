@@ -10,6 +10,12 @@ const TARGETS = [
   // 蓝牙口(8243)专留给 KeySession（kb-session.js）——多句柄抢读会掐断命令会话
 ];
 
+// USB 口(8102)默认挂起：会话与 watcher 抢读同一厂商接口时，Windows 把输入报文
+// 只投给其中一个句柄（2026-08-30 实锤：watcher 持句柄期间会话 USB 握手 4 万次
+// 零成功，同脚本独占时秒通）——会话永远握不上手。默认由 KeySession 独占 8102，
+// 仅当会话报 usb-block（连续握手失败，疑似固件不支持 USB 会话）才由 watcher 接管。
+const USB_PID = 0x8102;
+
 class KeyboardWatcher extends EventEmitter {
   constructor() {
     super();
@@ -21,6 +27,26 @@ class KeyboardWatcher extends EventEmitter {
     this.audioDedup = [];
     this.micOn = false;
     this.audioWatchdog = null;
+    this.usbSuspended = true; // 默认让 8102 给 KeySession（见文件头注释）
+    this.usbPresent = false;  // 枚举级在线检测（挂起期间也算，供托盘/UI 显示）
+    this._pathInfo = new Map(); // path -> 枚举信息（suspendUsb 按 pid 定向关句柄）
+  }
+
+  // 挂起=不新开 8102 且立即关掉已开句柄（把报文读取权整个让给会话）
+  suspendUsb() {
+    if (this.usbSuspended) return;
+    this.usbSuspended = true;
+    for (const [path, dev] of this.devices) {
+      const info = this._pathInfo.get(path);
+      if (info && info.productId === USB_PID) this.drop(path);
+    }
+  }
+
+  // 接管=立即扫描并打开 8102（会话连续握手失败退让后调用，保住有线键监听）
+  resumeUsb() {
+    if (!this.usbSuspended) return;
+    this.usbSuspended = false;
+    this.scan();
   }
 
   _feedAudioWatchdog() {
@@ -45,6 +71,7 @@ class KeyboardWatcher extends EventEmitter {
       try { dev.close(); } catch (_) {}
     }
     this.devices.clear();
+    this._pathInfo.clear();
   }
 
   scan() {
@@ -57,6 +84,8 @@ class KeyboardWatcher extends EventEmitter {
       if (!(d.usagePage >= 0xff00 && d.usage >= 0x1000)) continue;
       const t = TARGETS.find(t => t.vid === d.vendorId && t.pid === d.productId);
       if (!t) continue;
+      this._pathInfo.set(d.path, d);
+      if (d.productId === USB_PID && this.usbSuspended) { wanted.add(d.path); continue; }
       if (this.devices.has(d.path)) { wanted.add(d.path); continue; }
       try {
         const dev = new HID.HID(d.path);
@@ -78,6 +107,17 @@ class KeyboardWatcher extends EventEmitter {
     for (const [path, dev] of this.devices) {
       if (!wanted.has(path)) this.drop(path);
     }
+    this._emitPresence(list);
+  }
+
+  // 枚举级在线检测：与句柄解耦——8102 挂起期间托盘/设置页照样能显示「键盘已连接」
+  _emitPresence(list) {
+    const present = list.some(d =>
+      d.vendorId === TARGETS[0].vid && d.productId === USB_PID && d.usagePage >= 0xff00);
+    if (present !== this.usbPresent) {
+      this.usbPresent = present;
+      this.emit('device', { connected: present || this.devices.size > 0, name: TARGETS[0].name });
+    }
   }
 
   drop(path) {
@@ -85,7 +125,8 @@ class KeyboardWatcher extends EventEmitter {
     if (dev) {
       try { dev.close(); } catch (_) {}
       this.devices.delete(path);
-      this.emit('device', { connected: this.devices.size > 0 });
+      // usbPresent 兜底：挂起切换产生的 drop 不应把「键盘在线」误报成离线
+      this.emit('device', { connected: this.devices.size > 0 || this.usbPresent });
     }
   }
 

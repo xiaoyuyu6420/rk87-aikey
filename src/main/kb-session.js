@@ -18,6 +18,10 @@ const VID = 0x248a;
 const CMD_PID = 0x8243;
 const USB_PID = 0x8102; // USB 口（2.4G dongle 实测也枚举此 PID，非文档口径的 8243）
 const HANDSHAKE_TIMEOUT = 4000; // 开口后无握手回应即换口重试（无回应=键盘不在该口，判定与时长无关，短超时加快多口轮换）
+// USB 口熔断：连续 N 次握手超时 = 该固件批次大概率不支持 USB 命令会话，让 watcher
+// 接管 8102（保住有线键监听），冷却期后自动重试一次。冷却期转短只会反复交抢读权
+const USB_YIELD_AFTER = 3;
+const USB_BLOCK_MS = 10 * 60 * 1000;
 // DIAG-PROBE 观测日志默认关闭（每键必打会刷爆 app.log）；标定时设 RK87_PROBE=1 打开
 const PROBE = !!process.env.RK87_PROBE;
 
@@ -74,6 +78,8 @@ class KeySession extends EventEmitter {
     this._hbTs = 0;           // 最近一次心跳写出时刻（RTT 测量）
     this.rttAvg = 0;          // 心跳往返时间滑动平均（链路质量信号）
     this.rttBad = 0;          // 连续 RTT 超标次数
+    this._audioMark = 0;      // 上次采样的音频包累计（包率监控）
+    this._audioLow = 0;       // 连续低包率秒数（链路劣化判定）
     this.pressed = new Set(); // 按键边沿去重
     this.rx = { std: 0, vendor: 0, audio: 0, other: 0 }; // 收包计数（诊断：区分报文断流 vs 注入失效）
     this._rxMark = { std: 0, vendor: 0, audio: 0, other: 0 };
@@ -92,6 +98,9 @@ class KeySession extends EventEmitter {
     this.devPath = null;
     this.lastGoodPath = null; // 上次握手成功的口优先复用
     this.triedPaths = new Set(); // 一轮重连里已试过无回应的口
+    this._usbFailStreak = 0;  // USB 口连续握手超时（跨轮累计，USB 握手成功才清零）
+    this._usbBlockedUntil = 0; // USB 熔断截止时刻（0=未熔断）
+    this._offlineEmitTs = 0;  // 最近一次离线 state 发出时刻（60s 限频防日志刷屏）
   }
 
   start() {
@@ -99,15 +108,31 @@ class KeySession extends EventEmitter {
     this._open();
   }
 
-  // 候选口排序：上次成功的 > USB dongle（更稳）> 蓝牙；跳过本轮已试过的
+  // 候选口排序：上次成功的 > 蓝牙（USB 刚握手失败过时）> USB；USB 熔断期整体剔除；
+  // 跳过本轮已试过的
+  usbBlocked() { return this._usbBlockedUntil > Date.now(); }
+
   _pick(cands) {
-    const avail = cands.filter(d => !this.triedPaths.has(d.path));
+    const pool = this.usbBlocked() ? cands.filter(d => d.productId !== USB_PID) : cands;
+    const avail = pool.filter(d => !this.triedPaths.has(d.path));
     if (!avail.length) return null;
     const usb = d => !isBluetoothHid(d);
+    // USB 刚握手失败过且蓝牙口在场：先试蓝牙（4s 死等换秒级恢复）
+    const btFirst = this._usbFailStreak > 0;
+    const modeRank = d => (btFirst ? usb(d) : !usb(d));
     avail.sort((a, b) =>
       (b.path === this.lastGoodPath) - (a.path === this.lastGoodPath) ||
-      usb(b) - usb(a));
+      modeRank(a) - modeRank(b));
     return avail[0];
+  }
+
+  // 离线 state 限频：同一段离线 episode 内 60s 只发一次（UI 徽章本就已是离线态，
+  // 重复发只刷日志——2026-08-30 实测 USB 死循环时两天刷了 2.3 万行）
+  _emitOffline(reason) {
+    const now = Date.now();
+    if (this._offlineEmitTs && now - this._offlineEmitTs < 60000) return;
+    this._offlineEmitTs = now;
+    this.emit('state', { connected: false, reason });
   }
 
   _open() {
@@ -119,6 +144,12 @@ class KeySession extends EventEmitter {
     if (this.dev) return; // 已有活动句柄：当前会话由握手超时/心跳看护管理，勿重开
     try {
       if (!this.binding) this.binding = loadBinding();
+      // 熔断到期：解除并通知 watcher 收回 8102 读权，给 USB 一次重试机会
+      if (this._usbBlockedUntil && !this.usbBlocked()) {
+        this._usbBlockedUntil = 0;
+        console.log('[session] USB 熔断到期，重试有线会话');
+        this.emit('usb-block', { blocked: false });
+      }
       const cands = this.binding.devices()
         .filter(d => d.vendorId === VID && (d.productId === CMD_PID || d.productId === USB_PID) && d.usagePage >= 0xff00);
       const devInfo = this._pick(cands);
@@ -126,7 +157,7 @@ class KeySession extends EventEmitter {
         // 全部候选都试过仍无回应：清空重来（键盘可能切换了连接模式）
         if (cands.length) this.triedPaths.clear();
         this._absentStreak = (this._absentStreak || 0) + 1; // 设备缺席：退避计数（见 _scheduleReconnect）
-        this.emit('state', { connected: false, reason: 'no-cmd-interface' });
+        this._emitOffline('no-cmd-interface');
         this._scheduleReconnect();
         return;
       }
@@ -154,6 +185,7 @@ class KeySession extends EventEmitter {
           this._write(5, [], 'heartbeat');
         }
         this._voiceStopGuard();
+        this._audioQualityGuard();
         this._rxStats();
         // 电量刷新：5 分钟一次 cmd=12（156 回复带电量，官方同款节奏；62B 写开销可忽略）
         if (this.connected && Date.now() - this._elecQs > 300000) {
@@ -166,7 +198,7 @@ class KeySession extends EventEmitter {
       this.hsTimer = setTimeout(() => {
         if (!this.connected) this._onDisconnect('handshake-timeout(' + this.transport + ')');
       }, HANDSHAKE_TIMEOUT);
-      this.emit('state', { connected: false, reason: 'probing', transport: this.transport });
+      this._emitOffline('probing');
       console.log(`[session] 尝试命令口 ${this.transport} ${bt ? '' : devInfo.path}`);
     } catch (e) {
       if (this.devPath) this.triedPaths.add(this.devPath); // 开口失败也换口（如被官方软件独占）
@@ -300,6 +332,8 @@ class KeySession extends EventEmitter {
         setTimeout(() => this._write(1, [], 'open'), 150);
         this.connected = true;
         this._openFailStreak = 0;
+        if (this.transport === 'USB') this._usbFailStreak = 0; // USB 会话打通，清握手失败账
+        this._offlineEmitTs = 0; // 新 episode：下次离线允许立刻发一次 state
         this.lastGoodPath = this.devPath;
         this.triedPaths.clear();
         if (this.hsTimer) { clearTimeout(this.hsTimer); this.hsTimer = null; }
@@ -406,6 +440,26 @@ class KeySession extends EventEmitter {
     this._lastStatTs = now;
   }
 
+  // 音频链路质量监控：推流期音频包率过低 = 蓝牙链路劣化（包大量丢失 → 解码 PCM
+  // 残缺 → 输入法录到静音「唤不醒」）。语音期心跳 RTT 被豁免（防长按误判），链路
+  // 劣化在这里靠包率抓：正常 ~66 包/s，连续 4s < 40/s 判劣化，强制重连恢复链路。
+  _audioQualityGuard() {
+    if (!this.connected || !this.micOn) { this._audioMark = this.rx.audio; this._audioLow = 0; return; }
+    const streaming = this.lastAudioTs && Date.now() - this.lastAudioTs < 2000;
+    if (!streaming) { this._audioMark = this.rx.audio; this._audioLow = 0; return; } // 松键/流间歇：不判
+    const rate = this.rx.audio - (this._audioMark ?? this.rx.audio);
+    this._audioMark = this.rx.audio;
+    if (rate < 40) {
+      if (++this._audioLow >= 4) {
+        console.log(`[session] 音频包率过低（${rate}/s，连续 ${this._audioLow}s），链路劣化，强制重连`);
+        this._audioLow = 0;
+        this._onDisconnect('audio-degraded');
+      }
+    } else {
+      this._audioLow = 0;
+    }
+  }
+
   // 语音停止看护：松开语音键（stopVoice 已发 cmd=4）后若固件仍持续推音频流，
   // 打字报文会被音频帧淹没（表现：语音之后打字时好时坏，切蓝牙才恢复）。
   // 停止命令走蓝牙可能丢包且无确认 → 流不停就重发；重发仍不停说明固件卡死，
@@ -484,6 +538,8 @@ class KeySession extends EventEmitter {
     this._writeFail = 0;
     this.rttAvg = 0;
     this.rttBad = 0;
+    this._audioMark = 0;
+    this._audioLow = 0;
     this.pressed.clear(); // 断线清按键状态，避免重连后边沿错乱
     kbdInject.reset();    // 回注侧同样清边沿（残留按下的键全部抬起）
     this.pendingHb = false;
@@ -496,7 +552,18 @@ class KeySession extends EventEmitter {
     if (this.devPath) this.triedPaths.add(this.devPath);
     if (was) {
       this.emit('state', { connected: false, reason, transport: this.transport });
+      this._offlineEmitTs = Date.now(); // 真实断线必发一次；后续 probing 轮询进入限频
       this.emit('mic', { on: false, source: 'disconnect' }); // UI 徽章兜底复位
+    }
+    // USB 口握手超时单独记账：连续多次 = 大概率固件不支持 USB 会话（或端口坏了），
+    // 熔断并让 watcher 接管 8102，冷却后再试
+    if (/^handshake-timeout\(USB\)/.test(reason)) {
+      this._usbFailStreak++;
+      if (this._usbFailStreak >= USB_YIELD_AFTER && !this._usbBlockedUntil) {
+        this._usbBlockedUntil = Date.now() + USB_BLOCK_MS;
+        console.log(`[session] USB 口连续 ${this._usbFailStreak} 次握手无回应，熔断 ${USB_BLOCK_MS / 60000} 分钟（watcher 接管有线监听）`);
+        this.emit('usb-block', { blocked: true, until: this._usbBlockedUntil });
+      }
     }
     this._scheduleReconnect();
   }
@@ -554,6 +621,12 @@ class KeySession extends EventEmitter {
   reconnect() {
     if (this.stopped) return;
     if (this.dev) this._onDisconnect('manual-reconnect');
+    // 用户显式重试 = 推翻熔断（watcher 收回 8102 读权），USB 账目清零从头探测
+    if (this._usbBlockedUntil) {
+      this._usbBlockedUntil = 0;
+      this._usbFailStreak = 0;
+      this.emit('usb-block', { blocked: false });
+    }
     this.triedPaths.clear();
     this._open();
   }

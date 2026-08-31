@@ -22,6 +22,7 @@ function ensureUser32() {
 let SendInput = null;
 function ensureSendInput() {
   if (SendInput) return;
+  const koffi = require('koffi'); // 局部 require：ensureUser32 里的 koffi 是它的函数局部变量
   const user32 = ensureUser32();
   const KEYBDINPUT = koffi.struct('KEYBDINPUT', {
     wVk: 'uint16', wScan: 'uint16', dwFlags: 'uint32', time: 'uint32', dwExtraInfo: 'uint64',
@@ -186,7 +187,8 @@ function postRawKey(name, down, flags) {
     if (IS_MAC) postMac(vk, down, flags || 0);
     else pressKeyWin(vk, !down);
     return true;
-  } catch (_) {
+  } catch (e) {
+    console.log(`[action] postRawKey(${name}) 异常:`, e.message);
     return false;
   }
 }
