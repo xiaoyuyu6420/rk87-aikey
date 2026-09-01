@@ -9,6 +9,10 @@ const { app } = require('electron');
 
 const MAX_PROFILES = 5;
 
+// AI 层（任意键盘：触发键+F1~F12 → 动作槽位）默认关闭：
+// 热键不注册则 F 键零影响（不启用绝不抢占，见 ailayer.js 头注释）
+const AI_LAYER_DEFAULT = { enabled: false, trigger: 'ctrlalt', slots: {} };
+
 const DEFAULTS = {
   // 顶层 bindings/bindingsAi 由 projectActive() 投影生成（= active 档的引用）
   profiles: { order: ['default'], activeId: 'default', names: { default: '默认' } },
@@ -36,6 +40,7 @@ const DEFAULTS = {
     soundVolume: 0.5,        // 音量 0-1
     soundCustomDir: '',      // 自选 wav 目录（soundPack=custom 时生效，目录内 wav 随机播放）
   },
+  aiLayer: AI_LAYER_DEFAULT, // 形状见 ailayer.normalizeAiLayer：{ enabled, trigger, slots }
 };
 
 function configPath() {
@@ -122,6 +127,11 @@ function load() {
     ...migrateRaw(raw),
     labels: { ...(raw.labels || {}) },
     settings: { ...DEFAULTS.settings, ...(raw.settings || {}) },
+    aiLayer: {
+      ...DEFAULTS.aiLayer,
+      ...(raw.aiLayer || {}),
+      slots: { ...(raw.aiLayer && raw.aiLayer.slots || {}) },
+    },
   };
   projectActive(cfg);
   return cfg;
@@ -185,6 +195,6 @@ function defaultBinding(keyId) {
 }
 
 module.exports = {
-  load, save, defaultBinding, DEFAULTS, MAX_PROFILES,
+  load, save, defaultBinding, DEFAULTS, MAX_PROFILES, AI_LAYER_DEFAULT,
   migrateRaw, projectActive, addProfile, renameProfile, delProfile, setActive,
 };

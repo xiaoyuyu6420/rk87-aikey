@@ -32,4 +32,6 @@ contextBridge.exposeInMainWorld('aikey', {
   saveReportPng: dataUrl => ipcRenderer.invoke('save-report', dataUrl),
   // 渲染端日志落盘（桥接等静默链路的观测，进主进程 app.log）
   log: msg => ipcRenderer.send('renderer-log', String(msg).slice(0, 300)),
+  // AI 层（任意键盘：触发键+F1~F12 → 动作槽位）
+  aiLayerOp: payload => ipcRenderer.invoke('ailayer-op', payload),
 });

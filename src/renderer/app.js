@@ -100,6 +100,7 @@ async function init() {
   initMicBridge();
   initSound();
   initStats();
+  initAiLayer();
 
   // 宏 30s 超时自动停 → 回填正在录制的行
   window.aikey.onMacroRecorded(data => {
@@ -1039,8 +1040,107 @@ function initSound() {
 
 // ---------- 打字统计 ----------
 // 主进程轮询系统键状态计数，这里每 2 秒拉一次摘要渲染（窗口可见时才拉）。
-const KEY_LABELS = {
-  space: '空格', enter: '回车', backspace: '退格', tab: 'Tab', esc: 'Esc',
+// ---------- AI 层：任意键盘 触发键+F1~F12 → 12 个动作槽位 ----------
+let aiLayerConfig = null; // 主进程侧规范化后的配置（保存后以返回值为准）
+
+async function initAiLayer() {
+  const card = document.getElementById('ailayer-card');
+  const st = await window.aikey.aiLayerOp({ op: 'get' });
+  if (!st.supported) return; // 仅 Windows：卡片保持隐藏（RK 完整模式不受影响）
+  card.hidden = false;
+  console.log('[ailayer-ui] AI 层卡片已显示，触发键', st.config && st.config.trigger);
+  aiLayerConfig = st.config || { enabled: false, trigger: 'ctrlalt', slots: {} };
+  const slotKeys = st.slotKeys || [];
+
+  const optEn = document.getElementById('opt-ailayer');
+  const selTrigger = document.getElementById('ailayer-trigger');
+  const status = document.getElementById('ailayer-status');
+  const slotsEl = document.getElementById('ailayer-slots');
+
+  const syncStatus = () => {
+    status.textContent = aiLayerConfig.enabled ? '监听中' : '未启用';
+    status.classList.toggle('on', !!aiLayerConfig.enabled);
+  };
+
+  const save = async patch => {
+    const r = await window.aikey.aiLayerOp({ op: 'set', config: { ...aiLayerConfig, ...patch } });
+    if (r && r.ok) { aiLayerConfig = r.config; syncStatus(); }
+    else toast((r && r.error) || '保存失败', true);
+  };
+
+  optEn.onchange = () => save({ enabled: optEn.checked });
+  selTrigger.onchange = () => save({ trigger: selTrigger.value });
+
+  document.getElementById('ailayer-preset').onclick = async () => {
+    const r = await window.aikey.aiLayerOp({ op: 'preset' });
+    if (r && r.ok) {
+      aiLayerConfig = r.config;
+      syncStatus();
+      renderSlots();
+      toast('已填入 Coding 预设：F1 Claude · F2 ChatGPT · F3 Gemini · F4 语音输入 · F5 截图 · F6 记事本');
+    }
+  };
+
+  const PLACEHOLDER = { app: 'C:/path/程序.exe', url: 'https://…', hotkey: 'Ctrl+Shift+S' };
+  function renderSlots() {
+    slotsEl.innerHTML = '';
+    for (const key of slotKeys) {
+      const action = (aiLayerConfig.slots && aiLayerConfig.slots[key]) || { type: 'none' };
+      const row = document.createElement('div');
+      row.className = 'ailayer-row';
+
+      const name = document.createElement('span');
+      name.className = 'ailayer-key';
+      name.textContent = key.toUpperCase();
+
+      const sel = document.createElement('select');
+      for (const [v, label] of [['none', '不动作'], ['app', '启动程序'], ['url', '打开网址'], ['hotkey', '快捷键']]) {
+        const o = document.createElement('option');
+        o.value = v; o.textContent = label;
+        sel.appendChild(o);
+      }
+      sel.value = action.type || 'none';
+
+      const input = document.createElement('input');
+      input.value = action.target || action.combo || '';
+      const syncInput = () => {
+        input.hidden = sel.value === 'none';
+        input.placeholder = PLACEHOLDER[sel.value] || '';
+      };
+      syncInput();
+
+      const commit = () => {
+        const v = input.value.trim();
+        const a = sel.value === 'none' ? { type: 'none' }
+          : sel.value === 'hotkey' ? { type: 'hotkey', combo: v }
+          : { type: sel.value, target: v };
+        save({ slots: { ...aiLayerConfig.slots, [key]: a } });
+      };
+      sel.onchange = () => { syncInput(); commit(); };
+      input.onchange = commit;
+
+      const btn = document.createElement('button');
+      btn.className = 'ghost-btn';
+      btn.textContent = '试';
+      btn.title = '立即执行一次该动作';
+      btn.onclick = async () => {
+        commit();
+        const r = await window.aikey.aiLayerOp({ op: 'test', key });
+        if (r && r.ok === false) toast(r.error || '执行失败', true);
+      };
+
+      row.append(name, sel, input, btn);
+      slotsEl.appendChild(row);
+    }
+  }
+
+  optEn.checked = !!aiLayerConfig.enabled;
+  selTrigger.value = aiLayerConfig.trigger || 'ctrlalt';
+  syncStatus();
+  renderSlots();
+}
+
+const KEY_LABELS = {  space: '空格', enter: '回车', backspace: '退格', tab: 'Tab', esc: 'Esc',
   up: '↑', down: '↓', left: '←', right: '→',
   home: 'Home', end: 'End', pgup: 'PgUp', pgdn: 'PgDn', delete: 'Del', insert: 'Ins',
   minus: '-', equal: '=', comma: ',', period: '.', slash: '/', backtick: '`',
@@ -1190,7 +1290,7 @@ function drawReport(s) {
 
   // 标题 + 落款日期
   g.fillStyle = '#e8eaf0'; g.font = '600 32px system-ui, sans-serif';
-  g.fillText('RK87 AIKey · 打字报告', X, y);
+  g.fillText('AnyKey AI · 打字报告', X, y);
   const now = new Date();
   g.fillStyle = '#8b93a3'; g.font = '15px system-ui, sans-serif';
   g.fillText(`${now.getFullYear()} 年 ${now.getMonth() + 1} 月 ${now.getDate()} 日`, X, y + 30);
@@ -1284,7 +1384,7 @@ function drawReport(s) {
 
   // 底部落款
   g.fillStyle = '#555c6b'; g.font = '13px system-ui, sans-serif';
-  g.fillText('由 RK87 AIKey 本机生成 · 数据仅存本机（保留 90 天）', X, H - 60);
+  g.fillText('由 AnyKey AI 本机生成 · 数据仅存本机（保留 90 天）', X, H - 60);
   return cv;
 }
 

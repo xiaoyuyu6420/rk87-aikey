@@ -2,14 +2,14 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <title>RK87 AIKey</title>
+  <title>AnyKey AI</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <div class="aurora" aria-hidden="true"><i></i><i></i><i></i></div>
   <header>
     <div class="title">
-      <h1>RK87 AIKey</h1>
+      <h1>AnyKey AI</h1>
       <div id="session-pill" class="session-pill" title="键盘链路状态">
         <i class="dot"></i><span id="session-pill-text">检测中…</span>
         <button id="session-reconnect" class="pill-btn" title="强制重建键盘会话（蓝牙半死/USB 抢读时用）" hidden>重连</button>
@@ -30,8 +30,8 @@
       <section class="hero" id="hero3d">
         <div class="hero-canvas" id="hero-canvas"></div>
         <div class="hero-title" id="hero-title" aria-hidden="true">
-          <h2>RK87 AIKey</h2>
-          <p>外设控制台 · AI 键盘</p>
+          <h2>AnyKey AI</h2>
+          <p>任意键盘 · AI 控制台</p>
         </div>
         <div class="hero-overlay">
           <p class="hero-tip">拖拽旋转 · 点击发光的键直接配置</p>
@@ -59,6 +59,24 @@
       </section>
 
       <div id="key-list"></div>
+
+      <section class="mic-card reveal" id="ailayer-card" hidden>
+      <div class="mic-head">
+        <h2>AI 层 <small id="ailayer-sub">任意键盘：触发键 + F1~F12 变成 12 个 AI 快捷键</small></h2>
+        <label><input type="checkbox" id="opt-ailayer" /> 启用</label>
+      </div>
+      <div class="mic-row">
+        <span class="mic-label">触发键</span>
+        <select id="ailayer-trigger">
+          <option value="ctrlalt">Ctrl+Alt + F1~F12（推荐，不干扰常用快捷键）</option>
+          <option value="alt">Alt + F1~F12（进阶，自动跳过 F4 保留 Alt+F4）</option>
+        </select>
+        <button id="ailayer-preset" class="ghost-btn">Coding 预设</button>
+        <span id="ailayer-status" class="badge">未启用</span>
+      </div>
+      <div id="ailayer-slots"></div>
+      <p class="sub">不需要 RK 键盘：任意键盘按住触发键再按 F 键即触发，热键由系统拦截、不会串进当前应用；不启用时 F 键保持原样零影响。每格可配启动程序 / 网址 / 快捷键 / AI 直达（启动+延时发快捷键唤起输入框）。「Coding 预设」一键填入 Claude / ChatGPT / 语音输入等常用组合，改完即生效。</p>
+    </section>
 
       <section class="mic-card reveal">
       <div class="mic-head">

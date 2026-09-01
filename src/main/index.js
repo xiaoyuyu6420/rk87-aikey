@@ -1,4 +1,5 @@
-// RK87 AIKey 主进程：托盘 + 设置窗口 + HID 监听 + 动作分发
+// AnyKey AI 主进程：托盘 + 设置窗口 + HID 监听 + 动作分发
+// （原名 RK87 AIKey；0.12.0 起支持任意键盘的 AI 层，改名 AnyKey AI）
 
 const { app, Tray, Menu, BrowserWindow, ipcMain, nativeImage, shell, powerSaveBlocker, Notification } = require('electron');
 const path = require('path');
@@ -13,6 +14,7 @@ const { TypingStats } = require('./stats');
 const { FgWatcher } = require('./fgwatch');
 const { MacroRecorder, replayMacro, abortReplay, trimSteps, RECORD_MAX_MS } = require('./macro');
 const actions = require('./actions');
+const aiLayer = require('./ailayer');
 const kbdInject = require('./kbd-inject');
 const config = require('./config');
 const { REMOTE_SAFE_KEY, REMOTE_SAFE_VK, passKeyNameOf } = require('./pt-alias');
@@ -38,9 +40,40 @@ let macroRec = null;        // 宏录制器（仅录制期间存在 5ms 轮询�
 let macroArmed = false;     // 录制期间：抑制绑定动作/开麦联动，绑定键强制透传（键状态可见才能录到）
 let soundWin = null;        // 打字音效隐藏页（0x0 常驻；关闭音效时不创建，零开销）
 
+// 改名迁移（0.12.0 RK87 AIKey → AnyKey AI）：旧 userData 目录里的已知配置文件
+// 拷到新目录。已迁移/全新安装/dev 隔离目录（-dev 结尾）不动作。
+// 防路径遍历：① 源与目标都必须位于 allowedRoot 子树内（resolve 后前缀校验）；
+// ② 只拷白名单文件名（固定 4 个），不做递归目录复制——PORTABLE_EXECUTABLE_DIR
+// 是环境变量不信任其指向，白名单保证最坏情况也只是读到几个同名文件。
+const MIGRATE_FILES = ['config.json', 'stats.json', 'lifetime.json', 'profiles.json'];
+function migrateDataDir(oldDir, newDir, allowedRoot) {
+  try {
+    if (!oldDir || !newDir || !allowedRoot) return;
+    const from = path.resolve(oldDir);
+    const to = path.resolve(newDir);
+    const root = path.resolve(allowedRoot);
+    const inRoot = p => p === root || p.startsWith(root + path.sep);
+    if (!inRoot(from) || !inRoot(to) || from === to) return;
+    if (/-dev[\\\/]?$/.test(to)) return; // dev 隔离目录不迁移
+    if (!fs.existsSync(path.join(from, 'config.json'))) return;
+    if (fs.existsSync(path.join(to, 'config.json'))) return; // 目标已在用
+    fs.mkdirSync(to, { recursive: true });
+    let n = 0;
+    for (const f of MIGRATE_FILES) {
+      const src = path.join(from, f);
+      if (fs.existsSync(src)) { fs.copyFileSync(src, path.join(to, f)); n++; }
+    }
+    console.log(`[migrate] 已从旧版目录迁移 ${n} 个配置文件:`, from, '→', to);
+  } catch (e) {
+    console.log('[migrate] 迁移失败（忽略，按全新配置启动）:', e.message);
+  }
+}
+
 // portable 版配置随 exe 走：electron-builder 的 portable 启动器注入
 // PORTABLE_EXECUTABLE_DIR 环境变量（U 盘携带场景）；目录不可写（只读介质）则
 // 回退默认 %APPDATA%。必须在一切 getPath('userData') 消费方之前执行。
+// 数据目录名沿用 v0.11 起的 rk87-aikey-data 不变：目录名跟 exe 所在目录走，
+// 覆盖解压即完成"迁移"，避免引入环境变量参与的路径拼接。
 try {
   if (process.env.PORTABLE_EXECUTABLE_DIR) {
     const portableData = path.join(process.env.PORTABLE_EXECUTABLE_DIR, 'rk87-aikey-data');
@@ -49,6 +82,13 @@ try {
     app.setPath('userData', portableData);
   }
 } catch (_) { /* 只读介质：保持默认路径 */ }
+
+// 安装版：旧版目录迁移。0.11.x 的 userData 是 %APPDATA%/RK87 AIKey（Electron 默认
+// 按 productName 建目录）；更早版本按 name 是 %APPDATA%/rk87-aikey。两条都尝试，
+// migrateDataDir 幂等：第一条迁完（新目录已有 config.json）后第二条自动跳过。
+// 源路径来自 Electron API 的系统 appData（非外部输入），目标为新 userData。
+migrateDataDir(path.join(app.getPath('appData'), 'RK87 AIKey'), app.getPath('userData'), app.getPath('appData'));
+migrateDataDir(path.join(app.getPath('appData'), 'rk87-aikey'), app.getPath('userData'), app.getPath('appData'));
 
 // native 崩溃（koffi/HID 段错误等 JS 兜不住的）minidump 定点到 userData/Crashpad，
 // 配合已有的 logs/app.log 文件日志（见 boot 前的 console 落盘）做事后取证。
@@ -131,7 +171,7 @@ if (!gotLock) {
     // 崩溃自启后的新实例：让用户知道刚才发生过异常重启（而非静默吞掉）
     if (crashRestartDepth() > 0) {
       try {
-        const n = new Notification({ title: 'RK87 AIKey', body: '检测到异常退出，已自动重启' });
+        const n = new Notification({ title: 'AnyKey AI', body: '检测到异常退出，已自动重启' });
         n.on('click', () => showWindow());
         n.show();
       } catch (_) {}
@@ -273,12 +313,12 @@ function boot() {
   session.on('battery', b => {
     if (win && !win.isDestroyed()) win.webContents.send('battery', b);
     if (tray) {
-      tray.setToolTip(`RK87 AIKey — ${b.charging ? '充电中 ' : ''}${b.level}%` +
+      tray.setToolTip(`AnyKey AI — ${b.charging ? '充电中 ' : ''}${b.level}%` +
         (sessionOnline ? ` · 链路 ${Math.round(session.rttAvg || 0)}ms` : ' · 离线'));
     }
     if (!b.charging && b.level < 20 && !lowBatNotified) {
       lowBatNotified = true;
-      const n = new Notification({ title: 'RK87 AIKey', body: `键盘电量不足 ${b.level}%，记得充电` });
+      const n = new Notification({ title: 'AnyKey AI', body: `键盘电量不足 ${b.level}%，记得充电` });
       n.show();
     } else if (b.charging || b.level >= 30) {
       lowBatNotified = false; // 插上电/回血后重新武装提醒
@@ -353,6 +393,9 @@ function boot() {
   fg.onChange = onFgChange;
   syncFgWatcher();
 
+  // AI 层热键（任意键盘）：按配置注册/不注册（默认关闭，F 键零影响）
+  syncAilayer();
+
   // 精简 macOS 菜单栏：默认 7 项菜单太宽，刘海屏上会把右侧菜单栏图标挤掉；
   // 只留 app 名 + Edit（输入框的复制/粘贴/全选快捷键依赖 editMenu）
   if (process.platform === 'darwin') {
@@ -409,6 +452,23 @@ function syncFgWatcher() {
   const rules = (cfg.appRules || []).filter(r => cfg.profiles.order.includes(r.profileId));
   if (rules.length) fg.start();
   else fg.stop();
+}
+
+// ---------- AI 层（任意键盘的虚拟功能键区）----------
+// 配置变更/启动时的统一入口：enabled 才注册热键；热键触发 → actions.run 槽位动作
+function syncAilayer() {
+  const al = cfg.aiLayer;
+  if (al && al.enabled && al.trigger !== 'off') {
+    const r = aiLayer.start(al.trigger, key => {
+      const action = (al.slots && al.slots[key]) || { type: 'none' };
+      console.log(`[ailayer] ${key} 触发: ${JSON.stringify(action)}`);
+      const result = actions.run(action);
+      if (result && result.ok === false) console.log('[ailayer] 动作失败:', result.error);
+    });
+    if (!r.ok) console.log('[ailayer] 启动失败:', r.error);
+  } else {
+    aiLayer.stop();
+  }
 }
 
 function profilesState() {
@@ -543,7 +603,7 @@ function settleRemoteProbe() {
   console.log('[passthrough] F13 注入未落地：键盘流疑似被远程软件接管（全屏独占），本地无法唤起');
   try {
     new Notification({
-      title: 'RK87 AIKey',
+      title: 'AnyKey AI',
       body: '语音键没反应：键盘输入正被远程软件接管。可切远控窗口模式，或在 UU远程「设置→键盘→仅控制端响应的快捷键」加入 F13',
     }).show();
   } catch (_) {}
@@ -615,7 +675,7 @@ function exitOfficialRKAI() {
 }
 
 function setAutostart(on) {
-  app.setLoginItemSettings({ openAtLogin: !!on, name: 'RK87-AIKey' });
+  app.setLoginItemSettings({ openAtLogin: !!on, name: 'AnyKey-AI' });
 }
 
 // ---------- 打字音效隐藏页 ----------
@@ -762,6 +822,11 @@ function rebuildTrayMenu() {
       config.save(cfg);
       applyStatsCounting();
     } },
+    { label: 'AI 层热键（任意键盘 F 区）', type: 'checkbox', checked: !!(cfg.aiLayer && cfg.aiLayer.enabled), click: mi => {
+      cfg.aiLayer.enabled = mi.checked;
+      config.save(cfg);
+      syncAilayer();
+    } },
     { label: '打开日志文件夹', click: () => shell.openPath(path.join(app.getPath('userData'), 'logs')) },
     { label: '退出官方 RK-AI', click: () => { exitOfficialRKAI(); } },
     { label: '开机自启', type: 'checkbox', checked: !!(cfg.settings && cfg.settings.autostart), click: mi => {
@@ -773,7 +838,7 @@ function rebuildTrayMenu() {
     { label: '退出', click: () => { app.quit(); } },
   ]);
   tray.setContextMenu(menu);
-  tray.setToolTip('RK87 AIKey — 自定义功能键');
+  tray.setToolTip('AnyKey AI — 任意键盘的 AI 控制台');
 }
 
 let sessionOfflineReason = '';
@@ -801,7 +866,7 @@ function showWindow() {
   win = new BrowserWindow({
     width: 860,
     height: 720,
-    title: 'RK87 AIKey',
+    title: 'AnyKey AI',
     webPreferences: {
       preload: path.join(__dirname, '..', 'preload.js'),
       contextIsolation: true,
@@ -994,6 +1059,42 @@ ipcMain.handle('profile-op', (_e, payload) => {
   }
 });
 
+// AI 层配置：get / set（规范化+落盘+即时生效）/ preset（Coding 预设）/ test（试跑槽位）
+ipcMain.handle('ailayer-op', (_e, payload) => {
+  const { op } = payload || {};
+  const supported = process.platform === 'win32';
+  if (op === 'get') {
+    return {
+      supported,
+      running: aiLayer.running(),
+      failed: aiLayer.failedKeys(),
+      config: cfg.aiLayer,
+      triggers: aiLayer.triggerOptions(),
+      slotKeys: aiLayer.SLOT_KEYS,
+    };
+  }
+  if (op === 'set') {
+    if (!supported) return { ok: false, error: 'AI 层仅支持 Windows' };
+    cfg.aiLayer = aiLayer.normalizeAiLayer(payload && payload.config);
+    config.save(cfg);
+    syncAilayer();
+    return { ok: true, running: aiLayer.running(), failed: aiLayer.failedKeys(), config: cfg.aiLayer };
+  }
+  if (op === 'preset') {
+    if (!supported) return { ok: false, error: 'AI 层仅支持 Windows' };
+    cfg.aiLayer.slots = JSON.parse(JSON.stringify(aiLayer.CODING_PRESET));
+    config.save(cfg);
+    syncAilayer();
+    return { ok: true, config: cfg.aiLayer };
+  }
+  if (op === 'test') {
+    const action = cfg.aiLayer && cfg.aiLayer.slots[(payload && payload.key)];
+    if (!action || action.type === 'none') return { ok: false, error: '该槽位未配置动作' };
+    return actions.run(action);
+  }
+  return { ok: false, error: `未知操作 ${op}` };
+});
+
 ipcMain.handle('pick-program', async () => {
   const { dialog } = require('electron');
   const r = await dialog.showOpenDialog(win, {
@@ -1012,6 +1113,7 @@ function releaseDevices() {
   if (session) session.stop(); // 推流中途退出会先补发 cmd=4 停麦再关句柄
   if (stats) stats.stop(); // 统计落盘
   if (fg) fg.stop();
+  aiLayer.stop(); // AI 层热键线程（terminate 即注销全部热键）
   if (soundWin && !soundWin.isDestroyed()) soundWin.destroy(); // 音效隐藏页
   abortReplay(); // 掐掉宏回放孤儿 timer
 }
@@ -1039,7 +1141,7 @@ function aliveMarkStart() {
     console.log('[alive] 检测到上次运行非正常退出（疑似 native 崩溃），现场见 logs/app.log 与 Crashpad/');
     try {
       new Notification({
-        title: 'RK87 AIKey',
+        title: 'AnyKey AI',
         body: '上次运行异常退出（可能闪退）。日志已保留在 logs/app.log，如反复出现请反馈该文件',
       }).show();
     } catch (_) {}

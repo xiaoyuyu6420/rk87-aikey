@@ -471,3 +471,25 @@ button.recording { color: var(--err) !important; border-color: rgba(255, 93, 108
 ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, .12); border-radius: 5px; border: 2px solid transparent; background-clip: content-box; }
 ::-webkit-scrollbar-thumb:hover { background-color: rgba(255, 255, 255, .22); }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------- AI 层（任意键盘：触发键 + F1~F12 槽位） ---------- */
+.ailayer-row {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+}
+.ailayer-row .ailayer-key {
+  flex: 0 0 42px; text-align: center; font-size: 12px; font-weight: 600;
+  color: var(--text); background: rgba(8, 10, 15, .65);
+  border: 1px solid var(--line); border-radius: 8px; padding: 6px 0;
+}
+.ailayer-row select {
+  flex: 0 0 96px; background: rgba(8, 10, 15, .65); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px;
+}
+.ailayer-row select option { background: var(--bg-soft); }
+.ailayer-row input {
+  flex: 1; min-width: 0; background: rgba(8, 10, 15, .65); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px;
+}
+.ailayer-row input:focus, .ailayer-row select:focus {
+  outline: none; border-color: rgba(124, 156, 255, .55);
+}
