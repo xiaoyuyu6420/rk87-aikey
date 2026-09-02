@@ -1038,14 +1038,18 @@ function initSound() {
   };
 }
 
-// ---------- 打字统计 ----------
-// 主进程轮询系统键状态计数，这里每 2 秒拉一次摘要渲染（窗口可见时才拉）。
 // ---------- AI 层：任意键盘 触发键+F1~F12 → 12 个动作槽位 ----------
 let aiLayerConfig = null; // 主进程侧规范化后的配置（保存后以返回值为准）
 
 async function initAiLayer() {
   const card = document.getElementById('ailayer-card');
-  const st = await window.aikey.aiLayerOp({ op: 'get' });
+  let st;
+  try {
+    st = await window.aikey.aiLayerOp({ op: 'get' });
+  } catch (e) {
+    console.log('[ailayer-ui] 初始化失败（卡片保持隐藏）:', e && e.message);
+    return;
+  }
   if (!st.supported) return; // 仅 Windows：卡片保持隐藏（RK 完整模式不受影响）
   card.hidden = false;
   console.log('[ailayer-ui] AI 层卡片已显示，触发键', st.config && st.config.trigger);
@@ -1082,6 +1086,7 @@ async function initAiLayer() {
   };
 
   const PLACEHOLDER = { app: 'C:/path/程序.exe', url: 'https://…', hotkey: 'Ctrl+Shift+S' };
+  const SLOT_TYPES = [['none', '不动作'], ['app', '启动程序'], ['url', '打开网址'], ['hotkey', '快捷键']];
   function renderSlots() {
     slotsEl.innerHTML = '';
     for (const key of slotKeys) {
@@ -1094,9 +1099,15 @@ async function initAiLayer() {
       name.textContent = key.toUpperCase();
 
       const sel = document.createElement('select');
-      for (const [v, label] of [['none', '不动作'], ['app', '启动程序'], ['url', '打开网址'], ['hotkey', '快捷键']]) {
+      for (const [v, label] of SLOT_TYPES) {
         const o = document.createElement('option');
         o.value = v; o.textContent = label;
+        sel.appendChild(o);
+      }
+      // 高级动作（宏/系统等本编辑器不展开的类型）保留为选项，避免一渲染就被改写
+      if (action.type && !SLOT_TYPES.some(([v]) => v === action.type)) {
+        const o = document.createElement('option');
+        o.value = action.type; o.textContent = `保留：${action.type}`;
         sel.appendChild(o);
       }
       sel.value = action.type || 'none';
@@ -1109,15 +1120,58 @@ async function initAiLayer() {
       };
       syncInput();
 
+      // AI 直达：app/url 动作可带「启动后延时补发快捷键」，唤起/聚焦 AI 输入框
+      let afterEl = null;
+      const syncAfter = () => {
+        const need = sel.value === 'app' || sel.value === 'url';
+        if (need && !afterEl) {
+          afterEl = document.createElement('div');
+          afterEl.className = 'ailayer-after';
+          afterEl.innerHTML = `<span>AI 直达：启动后</span><input type="number" min="0" step="100"/>` +
+            `<span>ms 发</span><input type="text" placeholder="快捷键，如 Ctrl+L（留空关闭）"/>`;
+          // 初始渲染时 row 还没挂上 DOM，等循环尾部统一插入
+          if (row.isConnected) slotsEl.insertBefore(afterEl, row.nextSibling);
+        } else if (!need && afterEl) {
+          afterEl.remove();
+          afterEl = null;
+        }
+        if (afterEl) {
+          const [delayIn, hkIn] = afterEl.querySelectorAll('input');
+          delayIn.value = Number(action.afterDelay ?? 800) || 800;
+          hkIn.value = action.afterHotkey || '';
+        }
+      };
+      syncAfter();
+
       const commit = () => {
         const v = input.value.trim();
-        const a = sel.value === 'none' ? { type: 'none' }
-          : sel.value === 'hotkey' ? { type: 'hotkey', combo: v }
-          : { type: sel.value, target: v };
+        let a;
+        if (sel.value === 'none') a = { type: 'none' };
+        else if (sel.value === 'hotkey') a = { type: 'hotkey', combo: v };
+        else {
+          a = { type: sel.value, target: v };
+          if (afterEl) {
+            const [delayIn, hkIn] = afterEl.querySelectorAll('input');
+            const hk = hkIn.value.trim();
+            if (hk) { a.afterHotkey = hk; a.afterDelay = Number(delayIn.value) || 800; }
+          }
+        }
+        // 同类型编辑时保留本 UI 不认知的字段（如手配的宏 steps），换类型才重置；
+        // after* 由上面的输入框显式管理，不参与合并（否则清空关闭不生效）
+        if (action.type === sel.value) {
+          for (const [k, val] of Object.entries(action)) {
+            if (k in a || k === 'afterHotkey' || k === 'afterDelay') continue;
+            a[k] = val;
+          }
+        }
         save({ slots: { ...aiLayerConfig.slots, [key]: a } });
       };
-      sel.onchange = () => { syncInput(); commit(); };
+      sel.onchange = () => {
+        if (!SLOT_TYPES.some(([v]) => v === sel.value)) { sel.value = action.type || 'none'; return; }
+        syncInput(); syncAfter(); commit();
+      };
       input.onchange = commit;
+      if (afterEl) for (const inp of afterEl.querySelectorAll('input')) inp.onchange = commit;
 
       const btn = document.createElement('button');
       btn.className = 'ghost-btn';
@@ -1131,6 +1185,7 @@ async function initAiLayer() {
 
       row.append(name, sel, input, btn);
       slotsEl.appendChild(row);
+      if (afterEl && !afterEl.isConnected) slotsEl.insertBefore(afterEl, row.nextSibling);
     }
   }
 
@@ -1140,7 +1195,10 @@ async function initAiLayer() {
   renderSlots();
 }
 
-const KEY_LABELS = {  space: '空格', enter: '回车', backspace: '退格', tab: 'Tab', esc: 'Esc',
+// ---------- 打字统计 ----------
+// 主进程轮询系统键状态计数，这里每 2 秒拉一次摘要渲染（窗口可见时才拉）。
+const KEY_LABELS = {
+  space: '空格', enter: '回车', backspace: '退格', tab: 'Tab', esc: 'Esc',
   up: '↑', down: '↓', left: '←', right: '→',
   home: 'Home', end: 'End', pgup: 'PgUp', pgdn: 'PgDn', delete: 'Del', insert: 'Ins',
   minus: '-', equal: '=', comma: ',', period: '.', slash: '/', backtick: '`',

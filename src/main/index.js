@@ -43,9 +43,9 @@ let soundWin = null;        // 打字音效隐藏页（0x0 常驻；关闭音效
 // 改名迁移（0.12.0 RK87 AIKey → AnyKey AI）：旧 userData 目录里的已知配置文件
 // 拷到新目录。已迁移/全新安装/dev 隔离目录（-dev 结尾）不动作。
 // 防路径遍历：① 源与目标都必须位于 allowedRoot 子树内（resolve 后前缀校验）；
-// ② 只拷白名单文件名（固定 4 个），不做递归目录复制——PORTABLE_EXECUTABLE_DIR
-// 是环境变量不信任其指向，白名单保证最坏情况也只是读到几个同名文件。
-const MIGRATE_FILES = ['config.json', 'stats.json', 'lifetime.json', 'profiles.json'];
+// ② 只拷白名单文件名（固定 3 个，全部有真实读写方），不做递归目录复制——
+// PORTABLE_EXECUTABLE_DIR 是环境变量不信任其指向，白名单保证最坏情况也只是读到几个同名文件。
+const MIGRATE_FILES = ['config.json', 'stats.json', 'lifetime.json'];
 function migrateDataDir(oldDir, newDir, allowedRoot) {
   try {
     if (!oldDir || !newDir || !allowedRoot) return;

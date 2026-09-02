@@ -37,14 +37,14 @@ kill_app() { # 杀本仓库 dev Electron 与打包实例（按记录的 PID）
   sleep 1
 }
 
-STAGES="${*:-w1_unit w2_devboot w3_pack}"
+STAGES="${*:-w1_unit w2_devboot w3_pack w4_ailayer}"
 
 for s in $STAGES; do
   echo "===== [stage] $s ====="
   case "$s" in
   w1_unit)
     if npm test > "$EV/w1-unit.log" 2>&1; then
-      verdict W1 pass "单测 7 文件全绿（$(grep -c '^结果: .* 0 fail' "$EV/w1-unit.log" 2>/dev/null || echo 7) 份报告）"
+      verdict W1 pass "单测全绿（$(grep -cE '^[0-9]+ passed, 0 failed' "$EV/w1-unit.log" 2>/dev/null || echo '?') 份报告 0 fail）"
     else
       verdict W1 app-bug "单测失败，见 w1-unit.log 尾部: $(tail -c 300 "$EV/w1-unit.log" | tr '\n' ' ')"
     fi
@@ -76,7 +76,7 @@ for s in $STAGES; do
 
     # renderer console 无 error
     node e2e/cdp.mjs console 4000 > "$EV/w2-console.json"
-    ERRN=$(grep -o '"type":"[a-z]*"' "$EV/w2-console.json" | grep -cE 'error|exception' || true)
+    ERRN=$(node -e "const a=JSON.parse(require('fs').readFileSync('$EV/w2-console.json','utf8')); console.log(a.filter(x=>x.type==='error'||x.type==='exception').length)" 2>/dev/null || echo 0)
     [ "$ERRN" -eq 0 ] && verdict W7 pass "renderer console 无 error" || verdict W7 app-bug "console 错误 x$ERRN: $(head -c 300 "$EV/w2-console.json")"
 
     # 无未捕获异常 + 降噪引擎就绪（dev 环境真 df.dll → DFN3 主引擎）
@@ -136,7 +136,7 @@ EOF
     # 打包产物启动冒烟：DFN3 从 app.asar.unpacked 加载 = P0-1 端到端证明
     UDP="$E2E_DIR/tmp-userdata-packed"
     rm -rf "$UDP"
-    EXE="dist/win-unpacked/RK87 AIKey.exe"
+    EXE="dist/win-unpacked/AnyKey AI.exe"
     [ -f "$EXE" ] || { verdict W13 app-bug "缺打包 exe: $EXE"; continue; }
     "$EXE" --remote-debugging-port=$PORT_PACKED --user-data-dir="$UDP" &
     echo $! > "$EV/packed.pid"
@@ -161,6 +161,17 @@ EOF
       verdict W13 app-bug "打包产物 25s 无 CDP 页面"
     fi
     kill_app
+    ;;
+
+  w4_ailayer)
+    # AI 层专项 E2E（v0.12.0）：启用态热键注入→动作执行 / 重注册竞态 / 默认关闭零影响
+    kill_app
+    if bash e2e/ailayer-e2e.sh > "$EV/w4-ailayer.log" 2>&1; then
+      verdict W15 pass "AI 层专项全绿（$(grep -cP '\tpass\t' "$EV/w4-ailayer.log" 2>/dev/null || echo '?') pass：B1 热键链路 / B3 重注册 / C 零影响）"
+    else
+      verdict W15 app-bug "AI 层专项有失败: $(grep -E 'app-bug|known-issue' "$EV/w4-ailayer.log" | head -2 | tr '\n' ' ')"
+    fi
+    tail -10 "$EV/w4-ailayer.log"
     ;;
   *)
     echo "[stage] 未知阶段 $s";;

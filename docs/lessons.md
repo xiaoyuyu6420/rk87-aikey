@@ -81,3 +81,30 @@ const msg = koffi.decode(buf, 'AILAYER_MSG');   // 显式读回
   所以 **dev 数据一直在 `%APPDATA%/Electron-dev`**，与正式目录无关。
 - 迁移函数三条防线：白名单根校验（oldDir 必须在 appData/portable 目录下）、
   dev 目录（`-dev` 结尾）跳过、目标已有 config.json 跳过（幂等）。
+
+## 7. Windows E2E 假阴性：tasklist 镜像名大小写 + 孤儿实例端口污染（v0.12.0 AI 层专项）
+
+- `tasklist` 输出的镜像名保留原始大小写（`Notepad.exe`），按 `grep -c "notepad.exe"`
+  计数**恒为 0**——"功能没生效"的结论可能纯属大小写。进程计数一律 `grep -ci`。
+- 测试拉起的 Electron 由 `node cli.js` 包装，`taskkill //PID <node>` 偶尔杀不到
+  electron.exe 孤儿：它继续占着 CDP 端口，下一轮 `wait_cdp` 探到的是**僵尸实例**，
+  后续全部 verdict（含"关闭态注入竟触发"）都是它在响应。杀进程必须 `//T` 杀树 +
+  按端口兜底（`netstat -ano` 找 LISTENING PID）+ 循环验证端口真正释放。
+- **教训**：E2E 报 bug 前先自证测试脚本无罪——计数命令手动跑一遍、环境里有没有
+  上一轮的残留实例。假阴性和假阳性同样浪费排查时间。
+
+## 8. worker 线程阻塞在原生调用时：terminate() 杀不死，WM_QUIT 才是正解（v0.12.0 修复）
+
+- `worker_threads` 的 `terminate()` 对**阻塞在原生调用**（如 GetMessageW）的线程
+  **无效且 Promise 永久悬挂**——线程不死、系统热键不释放、新 worker 注册必失败
+  （ERROR_HOTKEY_ALREADY_REGISTERED=1409）。表现为"改一次配置热键就坏死"。
+- 两个深坑：① **Node 的 `Worker.threadId` 是从 0 递增的小整数 id，不是 Win32 线程
+  ID**——拿它 `PostThreadMessageW` 静默投错线程；真 tid 必须在线程内
+  `GetCurrentThreadId()` 取了上报（本项目走 ready 消息）。
+  ② 僵尸 worker 还会收到注入消息并回调——主进程此时 `onTrigger` 已被 stop 置空，
+  **静默丢弃**，故障零痕迹。
+- 正确姿势：`PostThreadMessage(tid, WM_QUIT)` 让 `GetMessageW` 返回 0、循环自然
+  break、事件循环清空、线程自然死亡（热键随之释放）；`terminate()` 只作延迟兜底
+  （fire-and-forget 防悬挂），外加意外退出自愈重启（限次防风暴）。
+- **教训**：消息循环线程的生死要用自己的消息协议管，别指望运行时强杀；排查"时好
+  时坏"先验证假设的 id/句柄到底是不是你以为的那个域（Node id ≠ OS id）。

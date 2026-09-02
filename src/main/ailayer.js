@@ -73,9 +73,26 @@ function triggerOptions() {
 
 // ---------- 运行态 ----------
 let worker = null;
+let workerTid = 0;          // worker 的 Win32 线程 ID（ready 消息上报，PostThreadMessage 用）
 let hotkeyMap = new Map();  // id -> 'f1'.. 'f12'
 let onTrigger = null;       // (key) => void
 let lastFailed = [];
+let restartCount = 0, lastStartAt = 0; // 自愈限次：防退出风暴
+
+// 优雅退出用：PostThreadMessage(WM_QUIT) 让 GetMessageW 返回 0、线程真正死亡、
+// 热键随之释放。terminate() 对阻塞在原生 GetMessage 的线程**无效且 Promise 悬挂**
+// （实测：旧线程不死、热键不放、新 worker 注册必失败 → 改配置后热键坏死）。
+const WM_QUIT = 0x0012;
+let postQuit = null;
+function ensurePostQuit() {
+  if (postQuit !== null) return postQuit;
+  try {
+    const koffi = require('koffi');
+    const user32 = koffi.load('user32.dll');
+    postQuit = user32.func('int __stdcall PostThreadMessageW(uint32, uint32, uint64, int64)');
+  } catch (_) { postQuit = null; }
+  return postQuit;
+}
 
 function running() { return !!worker; }
 function failedKeys() { return lastFailed.slice(); }
@@ -85,16 +102,24 @@ function start(trigger, cb) {
   if (process.platform !== 'win32') return { ok: false, error: 'AI 层仅支持 Windows' };
   const hotkeys = buildHotkeys(trigger);
   if (!hotkeys.length) return { ok: false, error: `未知触发键方案 ${trigger}` };
-  stop(); // 幂等：先清旧 worker
+  stop(); // 幂等：先清旧 worker（WM_QUIT 优雅退出，见下）
   onTrigger = cb;
   hotkeyMap = new Map(hotkeys.map(h => [h.id, h.key]));
-  worker = new Worker(path.join(__dirname, 'ailayer-worker.js'), { workerData: { hotkeys } });
-  worker.on('message', m => {
+  const w = new Worker(path.join(__dirname, 'ailayer-worker.js'), { workerData: { hotkeys } });
+  worker = w;
+  lastStartAt = Date.now();
+  w.on('message', m => {
     if (m && m.type === 'ready') {
       lastFailed = Array.isArray(m.failed) ? m.failed : [];
+      // 注意存的是 Win32 线程 ID（GetCurrentThreadId 的返回值）；Worker.threadId 是
+      // Node 层的小整数递增 id，拿它 PostThreadMessage 会投错线程（WM_QUIT 无效）
+      workerTid = Number(m.threadId) || 0;
       const okN = hotkeys.length - lastFailed.length;
       console.log(`[ailayer] 已注册 ${okN}/${hotkeys.length} 个热键（${TRIGGERS[trigger] ? TRIGGERS[trigger].label : trigger}）` +
-        (lastFailed.length ? `；注册失败（被其他程序占用）: ${lastFailed.join(', ')}` : ''));
+        (lastFailed.length ? `；注册失败（重试后仍被占用）: ${lastFailed.join(', ')}` : ''));
+    } else if (m && m.type === 'koffi-failed') {
+      // 与「组合键被占用」是两类故障：这是环境坏了（AI 层整体不可用），别混进键列表
+      console.log(`[ailayer] koffi 加载失败，AI 层不可用: ${m.error}`);
     } else if (m && m.type === 'hotkey') {
       const key = hotkeyMap.get(Number(m.id));
       if (key && onTrigger) {
@@ -102,17 +127,41 @@ function start(trigger, cb) {
       }
     }
   });
-  worker.on('error', e => console.log('[ailayer] worker 异常:', e.message));
-  worker.on('exit', () => { /* terminate 后置空由 stop() 负责，这里只兜底 */ });
+  w.on('error', e => {
+    if (worker === w) worker = null; // 崩溃后别让 running() 误报“还在监听”
+    console.log('[ailayer] worker 异常退出，热键已全部注销:', e.message);
+  });
+  w.on('exit', code => {
+    if (worker !== w) return; // stop() 换代或已清理，无需处理
+    worker = null;
+    workerTid = 0;
+    console.log(`[ailayer] worker 意外退出(code=${code})，热键已全部注销`);
+    // 自愈限次：10 秒窗口内最多自动重启 3 次，超过视为环境问题放弃
+    if (Date.now() - lastStartAt > 10000) restartCount = 0;
+    if (++restartCount <= 3) {
+      console.log(`[ailayer] 自动重启 worker（第 ${restartCount} 次）...`);
+      start(trigger, cb);
+    } else {
+      console.log('[ailayer] worker 反复退出，放弃自动重启——AI 层热键失效');
+    }
+  });
   return { ok: true, count: hotkeys.length };
 }
 
-// 停止 = terminate worker。线程死亡 ⇒ Windows 自动注销其全部线程热键。
+// 停止 = 投 WM_QUIT 让消息循环自然返回（线程死亡 ⇒ Windows 自动注销其全部热键）；
+// 1 秒后仍不退再 terminate 兜底（对阻塞线程多半无效，但 fire-and-forget 不悬挂）。
 function stop() {
   if (worker) {
     const w = worker;
+    const tid = workerTid; // 先取 Win32 线程 ID，再清状态
     worker = null;
-    try { w.terminate(); } catch (_) { /* 已退出 */ }
+    workerTid = 0;
+    const post = ensurePostQuit();
+    if (post && tid) {
+      try { post(tid, WM_QUIT, 0, 0); } catch (_) { /* 优雅路径失败走兜底 */ }
+    }
+    const t = setTimeout(() => { try { w.terminate(); } catch (_) { /* 已退出 */ } }, 1000);
+    if (t.unref) t.unref();
   }
   hotkeyMap = new Map();
   onTrigger = null;

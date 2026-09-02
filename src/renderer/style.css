@@ -493,3 +493,15 @@ button.recording { color: var(--err) !important; border-color: rgba(255, 93, 108
 .ailayer-row input:focus, .ailayer-row select:focus {
   outline: none; border-color: rgba(124, 156, 255, .55);
 }
+/* AI 直达子行：启动后延时补发快捷键（紧跟所属槽位行） */
+.ailayer-after {
+  display: flex; align-items: center; gap: 8px; margin: -2px 0 8px 50px;
+  font-size: 12px; color: var(--text-dim, #8a93a6);
+}
+.ailayer-after input {
+  background: rgba(8, 10, 15, .65); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px;
+}
+.ailayer-after input[type="number"] { width: 72px; }
+.ailayer-after input[type="text"] { flex: 1; min-width: 0; }
+.ailayer-after input:focus { outline: none; border-color: rgba(124, 156, 255, .55); }
